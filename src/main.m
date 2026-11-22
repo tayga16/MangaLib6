@@ -25,6 +25,34 @@ static NSString *Escape(NSString *value) {
     return [value stringByAddingPercentEscapesUsingEncoding:NSUTF8StringEncoding];
 }
 
+static NSString *InfoText(id value) {
+    if ([value isKindOfClass:[NSString class]]) {
+        return [value stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    }
+    if ([value isKindOfClass:[NSNumber class]]) {
+        return [value stringValue];
+    }
+    if ([value isKindOfClass:[NSDictionary class]]) {
+        for (NSString *key in [NSArray arrayWithObjects:@"label", @"rus_name", @"name", nil]) {
+            NSString *text = InfoText([value objectForKey:key]);
+            if ([text length]) {
+                return text;
+            }
+        }
+    }
+    if ([value isKindOfClass:[NSArray class]]) {
+        NSMutableArray *parts = [NSMutableArray array];
+        for (id entry in value) {
+            NSString *text = InfoText(entry);
+            if ([text length] && ![parts containsObject:text]) {
+                [parts addObject:text];
+            }
+        }
+        return [parts componentsJoinedByString:@", "];
+    }
+    return @"";
+}
+
 static NSData *Download(NSString *url, NSError **error) {
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:url]
         cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:12];
@@ -77,6 +105,15 @@ static id Fetch(NSString *path, NSError **error) {
     UIButton *_previous;
     UIButton *_next;
     UITableView *_table;
+    UIScrollView *_infoView;
+    UIImageView *_cover;
+    UILabel *_coverStatus;
+    NSURLConnection *_coverConnection;
+    NSMutableData *_coverData;
+    NSDictionary *_mangaInfo;
+    NSArray *_catalog;
+    NSArray *_chapters;
+    BOOL _titleLoaded;
     UIScrollView *_pageView;
     UIImageView *_image;
     NSDictionary *_snapshot;
@@ -147,6 +184,20 @@ static id Fetch(NSString *path, NSError **error) {
     _table.dataSource = self;
     _table.delegate = self;
     [self.view addSubview:_table];
+    _infoView = [[UIScrollView alloc] initWithFrame:_table.frame];
+    _infoView.backgroundColor = [UIColor colorWithWhite:0.96 alpha:1];
+    _infoView.hidden = YES;
+    [self.view addSubview:_infoView];
+    _cover = [[UIImageView alloc] initWithFrame:CGRectMake((width - 160) / 2, 12, 160, 224)];
+    _cover.contentMode = UIViewContentModeScaleAspectFit;
+    _cover.backgroundColor = [UIColor colorWithWhite:0.9 alpha:1];
+    [_infoView addSubview:_cover];
+    _coverStatus = [[UILabel alloc] initWithFrame:_cover.frame];
+    _coverStatus.backgroundColor = [UIColor clearColor];
+    _coverStatus.textAlignment = UITextAlignmentCenter;
+    _coverStatus.font = [UIFont systemFontOfSize:14];
+    _coverStatus.numberOfLines = 0;
+    [_infoView addSubview:_coverStatus];
     _pageView = [[UIScrollView alloc] initWithFrame:CGRectMake(0, 172, width, height - 232)];
     _pageView.delegate = self;
     _pageView.backgroundColor = [UIColor blackColor];
@@ -308,16 +359,180 @@ static id Fetch(NSString *path, NSError **error) {
 
 - (void)setItems:(NSArray *)items screen:(NSInteger)screen {
     [self resetPageBuffer];
+    [self cancelCoverDownload];
     NSArray *replacement = [items copy];
     [_items release];
     _items = replacement;
     _screen = screen;
+    if (screen == 0) {
+        [_catalog release];
+        _catalog = [_items copy];
+        [_mangaInfo release];
+        _mangaInfo = nil;
+        [_chapters release];
+        _chapters = nil;
+        _cover.image = nil;
+        _titleLoaded = NO;
+    }
     _table.hidden = NO;
+    _infoView.hidden = YES;
     _pageView.hidden = YES;
     [self setPageImage:nil];
     _previous.hidden = YES;
     _next.hidden = YES;
     [_table reloadData];
+}
+
+- (CGFloat)infoLabel:(NSString *)text font:(UIFont *)font top:(CGFloat)top left:(CGFloat)left width:(CGFloat)width {
+    CGFloat height = ceil([text sizeWithFont:font constrainedToSize:CGSizeMake(width, CGFLOAT_MAX)
+        lineBreakMode:UILineBreakModeWordWrap].height);
+    UILabel *label = [[[UILabel alloc] initWithFrame:CGRectMake(left, top, width, MAX(height, font.lineHeight))] autorelease];
+    label.backgroundColor = [UIColor clearColor];
+    label.font = font;
+    label.numberOfLines = 0;
+    label.text = text;
+    [_infoView addSubview:label];
+    return label.frame.size.height;
+}
+
+- (void)showInformation {
+    [self resetPageBuffer];
+    _screen = 3;
+    _table.hidden = YES;
+    _pageView.hidden = YES;
+    _previous.hidden = YES;
+    _next.hidden = YES;
+    _infoView.hidden = NO;
+    for (UIView *view in [_infoView subviews]) {
+        if (view != _cover && view != _coverStatus) {
+            [view removeFromSuperview];
+        }
+    }
+    CGFloat width = _infoView.bounds.size.width;
+    CGFloat top = 252;
+    top += [self infoLabel:Name(_mangaInfo) font:[UIFont boldSystemFontOfSize:20] top:top left:20 width:width - 40] + 12;
+    UIButton *chapters = [UIButton buttonWithType:UIButtonTypeRoundedRect];
+    chapters.frame = CGRectMake(20, top, width - 40, 40);
+    [chapters setTitle:@"Открыть главы" forState:UIControlStateNormal];
+    [chapters addTarget:self action:@selector(openChapters) forControlEvents:UIControlEventTouchUpInside];
+    [_infoView addSubview:chapters];
+    top += 56;
+    NSMutableArray *names = [NSMutableArray array];
+    for (NSString *key in [NSArray arrayWithObjects:@"name", @"eng_name", @"otherNames", @"other_names", nil]) {
+        id value = [_mangaInfo objectForKey:key];
+        NSArray *entries = [value isKindOfClass:[NSArray class]] ? value : [NSArray arrayWithObject:(value ? value : @"")];
+        for (id entry in entries) {
+            NSString *name = InfoText(entry);
+            if ([name length] && ![name isEqual:Name(_mangaInfo)] && ![names containsObject:name]) {
+                [names addObject:name];
+            }
+        }
+    }
+    id count = nil;
+    id counts = [_mangaInfo objectForKey:@"items_count"];
+    if ([counts isKindOfClass:[NSDictionary class]]) {
+        count = [counts objectForKey:@"uploaded"];
+    }
+    if (!count || count == [NSNull null]) {
+        count = [_mangaInfo objectForKey:@"chapter_count"];
+    }
+    if (!_live) {
+        count = [_snapshot objectForKey:@"total_chapters"];
+    } else if (_chapters) {
+        count = [NSNumber numberWithUnsignedInteger:[_chapters count]];
+    }
+    NSString *year = InfoText([_mangaInfo objectForKey:@"releaseDate"]);
+    if (![year length]) {
+        year = InfoText([_mangaInfo objectForKey:@"releaseDateString"]);
+    }
+    NSArray *labels = [NSArray arrayWithObjects:@"Год", @"Формат", @"Тип", @"Глав на сайте", @"Статус", @"Автор", @"Издатель", @"Другие названия", nil];
+    NSArray *values = [NSArray arrayWithObjects:year, InfoText([_mangaInfo objectForKey:@"format"]),
+        InfoText([_mangaInfo objectForKey:@"type"]), InfoText(count), InfoText([_mangaInfo objectForKey:@"status"]),
+        InfoText([_mangaInfo objectForKey:@"authors"]), InfoText([_mangaInfo objectForKey:@"publisher"]),
+        [names componentsJoinedByString:@"\n"], nil];
+    for (NSUInteger index = 0; index < [labels count]; index++) {
+        NSString *value = [values objectAtIndex:index];
+        CGFloat labelHeight = [self infoLabel:[labels objectAtIndex:index] font:[UIFont boldSystemFontOfSize:15]
+            top:top left:20 width:122];
+        CGFloat valueHeight = [self infoLabel:([value length] ? value : @"Не указано") font:[UIFont systemFontOfSize:16]
+            top:top left:154 width:width - 174];
+        top += MAX(labelHeight, valueHeight) + 16;
+    }
+    _infoView.contentSize = CGSizeMake(width, top + 8);
+    _status.text = _titleLoaded || !_live ? @"Информация о манге" : @"Загружаем информацию о манге…";
+    [self loadCover];
+}
+
+- (void)openManga:(NSDictionary *)item {
+    [_slug release];
+    _slug = [[item objectForKey:@"slug_url"] copy];
+    [self cancelCoverDownload];
+    _cover.image = nil;
+    [_mangaInfo release];
+    _mangaInfo = [item copy];
+    [_chapters release];
+    _chapters = nil;
+    _titleLoaded = NO;
+    _infoView.contentOffset = CGPointZero;
+    [self showInformation];
+    if (_live) {
+        NSString *path = [NSString stringWithFormat:@"/manga/%@?fields%%5B%%5D=authors&fields%%5B%%5D=publisher&fields%%5B%%5D=format&fields%%5B%%5D=otherNames&fields%%5B%%5D=chap_count&fields%%5B%%5D=releaseDate", Escape(_slug)];
+        [self start:[NSDictionary dictionaryWithObjectsAndKeys:@"title", @"kind", path, @"path", nil]];
+    }
+}
+
+- (void)openChapters {
+    if (_busy) {
+        return;
+    }
+    if (!_live || _chapters) {
+        [self setItems:(_live ? _chapters : [_snapshot objectForKey:@"chapters"]) screen:1];
+        _status.text = _live ? @"Выбери главу" : [NSString stringWithFormat:@"Снимок: %lu из %@ глав",
+            (unsigned long)[_items count], [_snapshot objectForKey:@"total_chapters"]];
+    } else {
+        NSString *path = [NSString stringWithFormat:@"/manga/%@/chapters", Escape(_slug)];
+        [self start:[NSDictionary dictionaryWithObjectsAndKeys:@"chapters", @"kind", path, @"path", nil]];
+    }
+}
+
+- (void)cancelCoverDownload {
+    [_coverConnection cancel];
+    [_coverConnection release];
+    _coverConnection = nil;
+    [_coverData release];
+    _coverData = nil;
+}
+
+- (void)loadCover {
+    _coverStatus.hidden = _cover.image != nil;
+    if (_cover.image || _coverConnection) {
+        return;
+    }
+    id cover = [_mangaInfo objectForKey:@"cover"];
+    NSString *url = [cover isKindOfClass:[NSDictionary class]] ? InfoText([cover objectForKey:@"md"]) : @"";
+    if (![url length] && [cover isKindOfClass:[NSDictionary class]]) {
+        url = InfoText([cover objectForKey:@"default"]);
+    }
+    if (!_live || ![url hasPrefix:@"https://"] || ![[NSURL URLWithString:url] host]) {
+        _coverStatus.text = _live ? @"Нет обложки" : @"Обложка доступна\nв режиме API";
+        return;
+    }
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:url]
+        cachePolicy:NSURLRequestUseProtocolCachePolicy timeoutInterval:ImageRequestTimeout];
+    [request setValue:@"https://mangalib.me/" forHTTPHeaderField:@"Referer"];
+    [request setValue:@"1" forHTTPHeaderField:@"Site-Id"];
+    [request setValue:@"https://mangalib.me" forHTTPHeaderField:@"Origin"];
+    [request setValue:@"image/*" forHTTPHeaderField:@"Accept"];
+    _coverData = [[NSMutableData alloc] init];
+    _coverStatus.text = @"Загрузка обложки…";
+    _coverConnection = [[NSURLConnection alloc] initWithRequest:request delegate:self startImmediately:NO];
+    if (!_coverConnection) {
+        [self cancelCoverDownload];
+        _coverStatus.text = @"Не удалось\nзагрузить обложку";
+        return;
+    }
+    [_coverConnection scheduleInRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+    [_coverConnection start];
 }
 
 - (void)start:(NSDictionary *)task {
@@ -363,6 +578,11 @@ static id Fetch(NSString *path, NSError **error) {
         if (_screen == 2) {
             [self setItems:_items screen:1];
             _status.text = @"Выбери главу";
+        } else if (_screen == 1) {
+            [self showInformation];
+        } else if (_screen == 3) {
+            [self setItems:_catalog screen:0];
+            _status.text = @"Выбери мангу";
         } else {
             [self search];
         }
@@ -397,15 +617,7 @@ static id Fetch(NSString *path, NSError **error) {
             _status.text = [NSString stringWithFormat:@"Для этой манги нет снимка. Выбери %@ или включи Прямой API.", Name([_snapshot objectForKey:@"title"])];
             return;
         }
-        [_slug release];
-        _slug = [[item objectForKey:@"slug_url"] copy];
-        if (_live) {
-            NSString *path = [NSString stringWithFormat:@"/manga/%@/chapters", Escape(_slug)];
-            [self start:[NSDictionary dictionaryWithObjectsAndKeys:@"chapters", @"kind", path, @"path", nil]];
-        } else {
-            [self setItems:[_snapshot objectForKey:@"chapters"] screen:1];
-            _status.text = [NSString stringWithFormat:@"Снимок: 1 из %@ глав", [_snapshot objectForKey:@"total_chapters"]];
-        }
+        [self openManga:item];
     } else if (_live) {
         [self start:[NSDictionary dictionaryWithObjectsAndKeys:@"chapter", @"kind", item, @"chapter", _slug, @"slug", nil]];
     } else {
@@ -423,6 +635,8 @@ static id Fetch(NSString *path, NSError **error) {
         return;
     }
     _screen = 2;
+    [self cancelCoverDownload];
+    _infoView.hidden = YES;
     _table.hidden = YES;
     _pageView.hidden = NO;
     [self setPageImage:nil];
@@ -581,6 +795,10 @@ static id Fetch(NSString *path, NSError **error) {
 
 - (void)didReceiveMemoryWarning {
     [super didReceiveMemoryWarning];
+    if (_screen != 3) {
+        [self cancelCoverDownload];
+        _cover.image = nil;
+    }
     _lowMemory = YES;
     _readerGeneration++;
     [self cancelImageDownload];
@@ -707,6 +925,16 @@ static id Fetch(NSString *path, NSError **error) {
 }
 
 - (void)connection:(NSURLConnection *)connection didReceiveResponse:(NSURLResponse *)response {
+    if (connection == _coverConnection) {
+        NSInteger status = [response isKindOfClass:[NSHTTPURLResponse class]] ? [(NSHTTPURLResponse *)response statusCode] : 0;
+        if (status < 200 || status >= 300) {
+            [self cancelCoverDownload];
+            _coverStatus.text = [NSString stringWithFormat:@"Обложка:\nHTTP %ld", (long)status];
+        } else {
+            [_coverData setLength:0];
+        }
+        return;
+    }
     if (connection != _imageConnection) {
         return;
     }
@@ -721,18 +949,34 @@ static id Fetch(NSString *path, NSError **error) {
 }
 
 - (void)connection:(NSURLConnection *)connection didReceiveData:(NSData *)data {
+    if (connection == _coverConnection) {
+        [_coverData appendData:data];
+        return;
+    }
     if (connection == _imageConnection) {
         [_imageData appendData:data];
     }
 }
 
 - (void)connection:(NSURLConnection *)connection didFailWithError:(NSError *)error {
+    if (connection == _coverConnection) {
+        [self cancelCoverDownload];
+        _coverStatus.text = @"Не удалось\nзагрузить обложку";
+        return;
+    }
     if (connection == _imageConnection) {
         [self imageDownloadFailed:error allowFallback:TransientNetworkError(error)];
     }
 }
 
 - (void)connectionDidFinishLoading:(NSURLConnection *)connection {
+    if (connection == _coverConnection) {
+        _cover.image = [UIImage imageWithData:_coverData];
+        _coverStatus.hidden = _cover.image != nil;
+        _coverStatus.text = @"Обложка\nне поддерживается";
+        [self cancelCoverDownload];
+        return;
+    }
     if (connection != _imageConnection) {
         return;
     }
@@ -763,6 +1007,11 @@ static id Fetch(NSString *path, NSError **error) {
         id available = [constants isKindOfClass:[NSDictionary class]] ? [constants objectForKey:@"imageServers"] : nil;
         if ([available isKindOfClass:[NSArray class]] && [available count]) {
             value = available;
+        }
+    } else if ([kind isEqual:@"title"]) {
+        value = Fetch([task objectForKey:@"path"], &error);
+        if (![value isKindOfClass:[NSDictionary class]]) {
+            value = nil;
         }
     } else if ([kind isEqual:@"chapter"]) {
         NSDictionary *chapter = [task objectForKey:@"chapter"];
@@ -875,7 +1124,21 @@ static id Fetch(NSString *path, NSError **error) {
         return;
     }
     id value = [result objectForKey:@"value"];
-    if ([kind isEqual:@"catalog"] || [kind isEqual:@"chapters"]) {
+    if ([kind isEqual:@"title"]) {
+        NSMutableDictionary *title = [NSMutableDictionary dictionaryWithDictionary:_mangaInfo];
+        [title addEntriesFromDictionary:value];
+        [_mangaInfo release];
+        _mangaInfo = [title copy];
+        _titleLoaded = YES;
+        [self showInformation];
+        if (_smoke) {
+            [self openChapters];
+        }
+    } else if ([kind isEqual:@"catalog"] || [kind isEqual:@"chapters"]) {
+        if ([kind isEqual:@"chapters"]) {
+            [_chapters release];
+            _chapters = [value copy];
+        }
         [self setItems:value screen:[kind isEqual:@"catalog"] ? 0 : 1];
         _status.text = [NSString stringWithFormat:@"Прямой API: %lu %@", (unsigned long)[_items count],
             _screen == 0 ? @"результатов" : @"глав"];
@@ -892,10 +1155,7 @@ static id Fetch(NSString *path, NSError **error) {
                 }
             }
             if (selected && [kind isEqual:@"catalog"]) {
-                [_slug release];
-                _slug = [[selected objectForKey:@"slug_url"] copy];
-                NSString *path = [NSString stringWithFormat:@"/manga/%@/chapters", Escape(_slug)];
-                [self start:[NSDictionary dictionaryWithObjectsAndKeys:@"chapters", @"kind", path, @"path", nil]];
+                [self openManga:selected];
             } else if (selected) {
                 [self start:[NSDictionary dictionaryWithObjectsAndKeys:@"chapter", @"kind", selected, @"chapter", _slug, @"slug", nil]];
             } else {
@@ -915,6 +1175,13 @@ static id Fetch(NSString *path, NSError **error) {
 
 - (void)dealloc {
     [self cancelImageDownload];
+    [self cancelCoverDownload];
+    [_infoView release];
+    [_cover release];
+    [_coverStatus release];
+    [_mangaInfo release];
+    [_catalog release];
+    [_chapters release];
     [_query release];
     [_status release];
     [_table release];
