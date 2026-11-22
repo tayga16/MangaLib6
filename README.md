@@ -72,13 +72,7 @@ Android-версии в этом репозитории нет.
 поскольку `UIPrerenderedIcon` выключен. Логотип и цвета не перерисованы.
 На современных версиях iOS старый системный блик может отсутствовать.
 
-Иконки уже включены в репозиторий. Для пересоздания после замены исходника:
-
-```sh
-python3 -m pip install 'Pillow>=10,<13'
-python3 tools/make_icons.py
-meow build MangaLib6-ipa
-```
+Готовые иконки уже включены в репозиторий; Python для сборки не нужен.
 
 Версия для домашнего экрана iPad 1 — `Resources/Icon-72.png` (72×72).
 Исходник и ссылка на него: `tools/artwork/`.
@@ -119,49 +113,19 @@ meow build MangaLib6-ipa
 Если `meow` не в `PATH`, укажи путь
 к собранному бинарнику, например `~/meow/target/release/meow`.
 
-### Необязательный снимок
-
-Python нужен только на компьютере для подготовки снимка, не для живого API.
-Используются [mangalib-python-sdk](https://anipy.ru/ru/docs/mangalib-python-sdk/mangalib/)
-и Pillow. Подходит Python 3.11+.
-
-```sh
-python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
-.venv/bin/python tools/fetch_snapshot.py --query senko --title https://mangalib.me/ru/manga/3825--sewayaki-kitsune-no-senkosan --pages 3
-meow build MangaLib6-ipa
-.venv/bin/python tools/make_smoke_ipa.py build/MangaLib6_0.2.3.ipa
-```
-
-На Windows последний скрипт также запускается командой
-`py tools/make_smoke_ipa.py build/MangaLib6_0.2.3.ipa`.
-Для другого снимка передай `--query`, `--title` и `--pages` (1–20).
-Без снимка обычное приложение работает через прямой API; офлайн-режим пуст.
-Для smoke-проверки снимок нужно подготовить перед сборкой.
-Эти файлы предназначены только для локальной проверки: не добавляй их
-в Git и не прикладывай к публичному релизу. Публичный IPA собирается без снимка.
+Публичный IPA собирается без офлайн-снимка и работает через прямой API.
+Офлайн-режим без снимка пуст.
 
 ## LightTouch
 
 Проверено в LightTouch 0.0.13, iPad/iOS 5.1.1 с **Direct internet**
 и **Local network access**. Установи IPA в свою библиотеку устройств.
 
-Для установки через PowerShell останови выбранный гостевой iPad штатно,
-затем запусти из папки проекта:
+Перед установкой штатно выключи гостевой iPad. После установки запусти его
+в интерфейсе эмулятора, разблокируй экран и открой MangaLib6.
+Не устанавливай IPA поверх работающего гостя и не выключай его принудительно.
 
-```powershell
-./run-lighttouch.ps1 -EmulatorPath 'D:\LightTouch-v0.0.13-Windows-x86_64\lighttouch.exe' -DataRoot 'D:\Your-LightTouch-Library' -RecordId 'YOUR_32_HEX_RECORD_ID'
-```
-
-Подставь путь к своей библиотеке и реальный 32-символьный идентификатор устройства.
-Скрипт устанавливает IPA и ждёт штатного выключения; затем запусти iPad в GUI,
-разблокируй экран и открой MangaLib6. Параметр `-Smoke` выбирает проверочную сборку.
-Не запускай установку поверх работающего гостя и не выключай его принудительно.
-
-В `open-lighttouch-test.ps1` есть помощник открытия отдельной тестовой библиотеки;
-пути по умолчанию относятся к компьютеру разработки — передай свои параметры.
-В HyperHLE этой версии сеть не поддерживается: `run-emulator.ps1` годится
-для проверки интерфейса со снимком, но не живого API.
+В HyperHLE этой версии сеть не поддерживается, поэтому живой API там не работает.
 
 ## Проверено и ограничения
 
@@ -197,8 +161,7 @@ IPA не является App Store-сборкой: для реального у
 
 - `src/main.m` — нативный UI, API, буфер и зум (Objective-C, MRC).
 - `Info.plist`, `meow.toml` — метаданные приложения и сборка.
-- `tools/fetch_snapshot.py` — подготовка офлайн-снимка через Python SDK.
-- `tools/make_smoke_ipa.py` — отдельный IPA с автоматическими проверками.
-- `run-lighttouch.ps1`, `run-emulator.ps1` — запуск и установка в эмуляторах.
+- `Resources/` — готовые иконки приложения.
+- `tools/artwork/` — исходная иконка и ссылка на источник.
 
 Сборочный toolchain: [meow by sqmrak](https://github.com/sqmrak/meow).

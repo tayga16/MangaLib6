@@ -8,6 +8,6 @@ https://static.rustore.ru/apk/2063541439/content/ICON/6fc5feaf-001c-41ab-ad45-fd
 Название и логотип MangaLib принадлежат их правообладателям; MangaLib6 —
 неофициальный экспериментальный клиент.
 
-`tools/make_icons.py` создаёт PNG без прозрачности для iPhone/iPad и Retina.
+Готовые PNG без прозрачности для iPhone/iPad и Retina находятся в `Resources/`.
 Скругление, стандартный блик и тень добавляет SpringBoard iOS 5/6:
 в `Info.plist` установлен `UIPrerenderedIcon = false`.

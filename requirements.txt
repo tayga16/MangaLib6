@@ -1,2 +1,0 @@
-mangalib-python-sdk==1.0.0
-Pillow>=10,<13
