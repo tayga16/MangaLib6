@@ -2,7 +2,9 @@
 #include <math.h>
 
 static const NSInteger PageBufferSize = 5;
+static const NSInteger PageHistorySize = 2;
 static const NSInteger PageRetryLimit = 2;
+static const NSTimeInterval ImageRequestTimeout = 8;
 
 static BOOL TransientNetworkError(NSError *error) {
     NSInteger code = [error code];
@@ -25,7 +27,7 @@ static NSString *Escape(NSString *value) {
 
 static NSData *Download(NSString *url, NSError **error) {
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:url]
-        cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:20];
+        cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:12];
     [request setValue:@"1" forHTTPHeaderField:@"Site-Id"];
     [request setValue:@"https://mangalib.me/" forHTTPHeaderField:@"Referer"];
     [request setValue:@"https://mangalib.me" forHTTPHeaderField:@"Origin"];
@@ -33,12 +35,12 @@ static NSData *Download(NSString *url, NSError **error) {
     [request setValue:@"Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1" forHTTPHeaderField:@"User-Agent"];
     NSURLResponse *response = nil;
     NSData *data = nil;
-    for (NSInteger attempt = 0; attempt < 3; attempt++) {
+    for (NSInteger attempt = 0; attempt < 2; attempt++) {
         *error = nil;
         response = nil;
         data = [NSURLConnection sendSynchronousRequest:request returningResponse:&response error:error];
         NSError *failure = *error;
-        if (!TransientNetworkError(failure) || attempt == 2) {
+        if (!TransientNetworkError(failure) || attempt == 1) {
             break;
         }
         NSLog(@"MangaLib6 network retry %ld: %@ (%@)", (long)attempt + 1, url, [failure localizedDescription]);
@@ -68,7 +70,7 @@ static id Fetch(NSString *path, NSError **error) {
     return [json isKindOfClass:[NSDictionary class]] ? [json objectForKey:@"data"] : nil;
 }
 
-@interface MangaLib6Controller : UIViewController <UITableViewDataSource, UITableViewDelegate, UITextFieldDelegate, UIScrollViewDelegate, UIGestureRecognizerDelegate> {
+@interface MangaLib6Controller : UIViewController <UITableViewDataSource, UITableViewDelegate, UITextFieldDelegate, UIScrollViewDelegate, UIGestureRecognizerDelegate, NSURLConnectionDataDelegate> {
     UITextField *_query;
     UILabel *_status;
     UIButton *_mode;
@@ -83,13 +85,20 @@ static id Fetch(NSString *path, NSError **error) {
     NSMutableDictionary *_pageCache;
     NSMutableDictionary *_pageErrors;
     NSArray *_imageServers;
+    NSURLConnection *_imageConnection;
+    NSMutableData *_imageData;
+    NSDictionary *_imageTask;
+    NSArray *_imageURLs;
+    NSString *_preferredImageServer;
+    NSUInteger _imageServerIndex;
+    BOOL _imageRetryable;
+    BOOL _serversLoading;
     NSString *_slug;
     NSInteger _screen;
     NSInteger _pageIndex;
     NSUInteger _readerGeneration;
     BOOL _live;
     BOOL _busy;
-    BOOL _imageLoading;
     BOOL _lowMemory;
     BOOL _smoke;
 }
@@ -108,6 +117,14 @@ static id Fetch(NSString *path, NSError **error) {
 - (void)loadView {
     _pageCache = [[NSMutableDictionary alloc] init];
     _pageErrors = [[NSMutableDictionary alloc] init];
+    id savedServers = [[NSUserDefaults standardUserDefaults] objectForKey:@"MangaLib6ImageServers"];
+    if ([savedServers isKindOfClass:[NSArray class]]) {
+        _imageServers = [savedServers copy];
+    }
+    id preferredServer = [[NSUserDefaults standardUserDefaults] objectForKey:@"MangaLib6PreferredImageServer"];
+    if ([preferredServer isKindOfClass:[NSString class]]) {
+        _preferredImageServer = [preferredServer copy];
+    }
     self.view = [[[UIView alloc] initWithFrame:[[UIScreen mainScreen] bounds]] autorelease];
     self.view.backgroundColor = [UIColor whiteColor];
     CGFloat width = self.view.bounds.size.width;
@@ -167,6 +184,9 @@ static id Fetch(NSString *path, NSError **error) {
     _live = !smokeTest;
     [_mode setTitle:(_live ? @"Прямой API" : @"Снимок API") forState:UIControlStateNormal];
     [self search];
+    if (_live) {
+        [self refreshImageServers];
+    }
     if (smokeTest) {
         [self performSelector:@selector(smokeTest) withObject:nil afterDelay:0.5];
     }
@@ -332,6 +352,9 @@ static id Fetch(NSString *path, NSError **error) {
         _live = !_live;
         [_mode setTitle:(_live ? @"Прямой API" : @"Снимок API") forState:UIControlStateNormal];
         [self search];
+        if (_live) {
+            [self refreshImageServers];
+        }
     }
 }
 
@@ -413,10 +436,13 @@ static id Fetch(NSString *path, NSError **error) {
         [self trimPageBuffer];
         NSNumber *page = [NSNumber numberWithInteger:_pageIndex];
         [_pageErrors removeObjectForKey:page];
-        NSData *data = [_pageCache objectForKey:page];
-        if (data) {
-            [self displayPageData:data cacheHit:YES];
+        UIImage *image = [_pageCache objectForKey:page];
+        if (image) {
+            [self displayPageImage:image cacheHit:YES];
         } else {
+            if (_imageTask && [[_imageTask objectForKey:@"page_index"] integerValue] != _pageIndex) {
+                [self cancelImageDownload];
+            }
             [self updatePageStatus];
         }
         [self prefetchPages];
@@ -439,12 +465,17 @@ static id Fetch(NSString *path, NSError **error) {
 
 - (void)resetPageBuffer {
     _readerGeneration++;
+    [self cancelImageDownload];
     _lowMemory = NO;
     [_pageCache removeAllObjects];
     [_pageErrors removeAllObjects];
     [self setPageImage:nil];
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(nextPage) object:nil];
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(prefetchPages) object:nil];
+}
+
+- (NSInteger)bufferStart {
+    return MAX((NSInteger)0, _pageIndex - (_lowMemory ? 0 : PageHistorySize));
 }
 
 - (NSInteger)bufferEnd {
@@ -454,7 +485,7 @@ static id Fetch(NSString *path, NSError **error) {
 - (void)trimPageBuffer {
     for (NSMutableDictionary *entries in [NSArray arrayWithObjects:_pageCache, _pageErrors, nil]) {
         for (NSNumber *page in [entries allKeys]) {
-            if ([page integerValue] < _pageIndex || [page integerValue] >= [self bufferEnd]) {
+            if ([page integerValue] < [self bufferStart] || [page integerValue] >= [self bufferEnd]) {
                 [entries removeObjectForKey:page];
             }
         }
@@ -468,14 +499,23 @@ static id Fetch(NSString *path, NSError **error) {
         _status.text = [NSString stringWithFormat:@"Страница %ld: %@. %@", (long)_pageIndex + 1,
             [error objectForKey:@"message"], [error objectForKey:@"retry_at"] ? @"Повторяем в фоне…" : @"Для повтора вернись на неё."];
     } else {
-        _status.text = [NSString stringWithFormat:@"Прямой API: страница %ld/%lu%@. Буфер: %lu/%ld",
+        NSInteger forwardCount = 0;
+        NSInteger historyCount = 0;
+        for (NSNumber *cachedPage in _pageCache) {
+            if ([cachedPage integerValue] >= _pageIndex) {
+                forwardCount++;
+            } else {
+                historyCount++;
+            }
+        }
+        _status.text = [NSString stringWithFormat:@"Прямой API: страница %ld/%lu%@. Буфер: %ld/%ld. Назад: %ld",
             (long)_pageIndex + 1, (unsigned long)[_pages count], _image.image ? @"" : @" — загрузка",
-            (unsigned long)[_pageCache count], (long)([self bufferEnd] - _pageIndex)];
+            (long)forwardCount, (long)([self bufferEnd] - _pageIndex), (long)historyCount];
     }
 }
 
-- (void)displayPageData:(NSData *)data cacheHit:(BOOL)cacheHit {
-    [self setPageImage:[UIImage imageWithData:data]];
+- (void)displayPageImage:(UIImage *)image cacheHit:(BOOL)cacheHit {
+    [self setPageImage:image];
     [self updatePageStatus];
     NSLog(@"MangaLib6 live page %ld: decoded=%@ cacheHit=%@", (long)_pageIndex + 1,
         _image.image ? @"YES" : @"NO", cacheHit ? @"YES" : @"NO");
@@ -491,7 +531,16 @@ static id Fetch(NSString *path, NSError **error) {
 
 - (void)prefetchPages {
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(prefetchPages) object:nil];
-    if (!_live || _screen != 2 || _busy || _imageLoading) {
+    if (!_live || _screen != 2 || _busy || _imageTask) {
+        return;
+    }
+    if (![_imageServers count]) {
+        if (!_serversLoading) {
+            [self refreshImageServers];
+        }
+        if (_serversLoading) {
+            _status.text = @"Получаем адреса серверов изображений…";
+        }
         return;
     }
     NSTimeInterval retryDelay = 0;
@@ -521,9 +570,8 @@ static id Fetch(NSString *path, NSError **error) {
         if (_imageServers) {
             [task setObject:_imageServers forKey:@"servers"];
         }
-        _imageLoading = YES;
         NSLog(@"MangaLib6 buffer download page %ld (current %ld)", (long)index + 1, (long)_pageIndex + 1);
-        [NSThread detachNewThreadSelector:@selector(work:) toTarget:self withObject:task];
+        [self startImageDownload:task];
         return;
     }
     if (retryDelay > 0) {
@@ -535,10 +583,12 @@ static id Fetch(NSString *path, NSError **error) {
     [super didReceiveMemoryWarning];
     _lowMemory = YES;
     _readerGeneration++;
+    [self cancelImageDownload];
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(prefetchPages) object:nil];
     [self trimPageBuffer];
     if (_live && _screen == 2 && !_busy) {
         [self updatePageStatus];
+        [self prefetchPages];
     }
 }
 
@@ -549,43 +599,170 @@ static id Fetch(NSString *path, NSError **error) {
     }
 }
 
+- (void)refreshImageServers {
+    if (_serversLoading) {
+        return;
+    }
+    _serversLoading = YES;
+    [NSThread detachNewThreadSelector:@selector(work:) toTarget:self withObject:
+        [NSDictionary dictionaryWithObject:@"servers" forKey:@"kind"]];
+}
+
+- (void)cancelImageDownload {
+    [_imageConnection cancel];
+    [_imageConnection release];
+    _imageConnection = nil;
+    [_imageData release];
+    _imageData = nil;
+    [_imageTask release];
+    _imageTask = nil;
+    [_imageURLs release];
+    _imageURLs = nil;
+}
+
+- (void)startImageDownload:(NSDictionary *)task {
+    NSMutableDictionary *timedTask = [NSMutableDictionary dictionaryWithDictionary:task];
+    [timedTask setObject:[NSDate date] forKey:@"started_at"];
+    _imageTask = [timedTask copy];
+    _imageServerIndex = 0;
+    _imageRetryable = NO;
+    NSString *relative = [task objectForKey:@"image_path"];
+    while ([relative hasPrefix:@"/"]) {
+        relative = [relative substringFromIndex:1];
+    }
+    NSMutableArray *urls = [NSMutableArray array];
+    for (NSString *serverID in [NSArray arrayWithObjects:@"compress", @"download", @"secondary", @"main", nil]) {
+        for (NSDictionary *server in [task objectForKey:@"servers"]) {
+            if (![[server objectForKey:@"id"] isEqual:serverID] ||
+                ![[server objectForKey:@"site_ids"] containsObject:[NSNumber numberWithInt:1]]) {
+                continue;
+            }
+            NSString *base = [server objectForKey:@"url"];
+            if (![base isKindOfClass:[NSString class]] || ![base hasPrefix:@"https://"]) {
+                continue;
+            }
+            NSString *url = [NSString stringWithFormat:@"%@/%@", base, relative];
+            if (![urls containsObject:url]) {
+                if ([base isEqual:_preferredImageServer]) {
+                    [urls insertObject:url atIndex:0];
+                } else {
+                    [urls addObject:url];
+                }
+            }
+        }
+    }
+    _imageURLs = [urls copy];
+    if (![_imageURLs count]) {
+        [self completeImageDownload:nil error:[NSError errorWithDomain:@"MangaLib6" code:0 userInfo:
+            [NSDictionary dictionaryWithObject:@"Нет подходящих серверов изображений" forKey:NSLocalizedDescriptionKey]]];
+        return;
+    }
+    [self openImageConnection];
+}
+
+- (void)completeImageDownload:(UIImage *)image error:(NSError *)error {
+    NSMutableDictionary *result = [NSMutableDictionary dictionaryWithDictionary:_imageTask];
+    if (image) {
+        [result setObject:image forKey:@"value"];
+    } else {
+        [result setObject:(error ? [error localizedDescription] : @"Изображение не поддерживается") forKey:@"error"];
+        [result setObject:[NSNumber numberWithBool:_imageRetryable] forKey:@"retryable"];
+    }
+    [self cancelImageDownload];
+    [self finish:result];
+}
+
+- (void)openImageConnection {
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:
+        [NSURL URLWithString:[_imageURLs objectAtIndex:_imageServerIndex]]
+        cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:ImageRequestTimeout];
+    [request setValue:@"1" forHTTPHeaderField:@"Site-Id"];
+    [request setValue:@"https://mangalib.me/" forHTTPHeaderField:@"Referer"];
+    [request setValue:@"https://mangalib.me" forHTTPHeaderField:@"Origin"];
+    [request setValue:@"image/*" forHTTPHeaderField:@"Accept"];
+    [request setValue:@"Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1" forHTTPHeaderField:@"User-Agent"];
+    _imageData = [[NSMutableData alloc] init];
+    _imageConnection = [[NSURLConnection alloc] initWithRequest:request delegate:self startImmediately:NO];
+    if (!_imageConnection) {
+        [self completeImageDownload:nil error:[NSError errorWithDomain:NSURLErrorDomain code:NSURLErrorBadURL userInfo:nil]];
+        return;
+    }
+    [_imageConnection scheduleInRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+    [_imageConnection start];
+}
+
+- (void)imageDownloadFailed:(NSError *)error allowFallback:(BOOL)allowFallback {
+    _imageRetryable = _imageRetryable || TransientNetworkError(error);
+    [_imageConnection cancel];
+    [_imageConnection release];
+    _imageConnection = nil;
+    [_imageData release];
+    _imageData = nil;
+    if (allowFallback && _imageServerIndex + 1 < [_imageURLs count]) {
+        _imageServerIndex++;
+        [self openImageConnection];
+    } else {
+        [self completeImageDownload:nil error:error];
+    }
+}
+
+- (void)connection:(NSURLConnection *)connection didReceiveResponse:(NSURLResponse *)response {
+    if (connection != _imageConnection) {
+        return;
+    }
+    NSInteger status = [response isKindOfClass:[NSHTTPURLResponse class]] ? [(NSHTTPURLResponse *)response statusCode] : 0;
+    if (status < 200 || status >= 300) {
+        NSError *error = [NSError errorWithDomain:@"MangaLib6" code:status userInfo:
+            [NSDictionary dictionaryWithObject:[NSString stringWithFormat:@"HTTP %ld", (long)status] forKey:NSLocalizedDescriptionKey]];
+        [self imageDownloadFailed:error allowFallback:status != 403 && status != 429];
+        return;
+    }
+    [_imageData setLength:0];
+}
+
+- (void)connection:(NSURLConnection *)connection didReceiveData:(NSData *)data {
+    if (connection == _imageConnection) {
+        [_imageData appendData:data];
+    }
+}
+
+- (void)connection:(NSURLConnection *)connection didFailWithError:(NSError *)error {
+    if (connection == _imageConnection) {
+        [self imageDownloadFailed:error allowFallback:TransientNetworkError(error)];
+    }
+}
+
+- (void)connectionDidFinishLoading:(NSURLConnection *)connection {
+    if (connection != _imageConnection) {
+        return;
+    }
+    UIImage *image = [UIImage imageWithData:_imageData];
+    if (!image) {
+        [self imageDownloadFailed:nil allowFallback:YES];
+        return;
+    }
+    NSString *url = [_imageURLs objectAtIndex:_imageServerIndex];
+    NSLog(@"MangaLib6 HTTP 200 %@ (%lu bytes)", url, (unsigned long)[_imageData length]);
+    NSURL *address = [NSURL URLWithString:url];
+    NSString *base = [NSString stringWithFormat:@"%@://%@", [address scheme], [address host]];
+    if (![base isEqual:_preferredImageServer]) {
+        [_preferredImageServer release];
+        _preferredImageServer = [base copy];
+        [[NSUserDefaults standardUserDefaults] setObject:base forKey:@"MangaLib6PreferredImageServer"];
+    }
+    [self completeImageDownload:image error:nil];
+}
+
 - (void)work:(NSDictionary *)task {
     NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
     NSString *kind = [task objectForKey:@"kind"];
     NSError *error = nil;
     id value = nil;
-    NSArray *servers = nil;
-    BOOL retryableFailure = NO;
-    if ([kind isEqual:@"image"]) {
-        servers = [task objectForKey:@"servers"];
-        if (![servers count]) {
-            id constants = Fetch(@"/constants?fields%5B%5D=imageServers", &error);
-            id available = [constants isKindOfClass:[NSDictionary class]] ? [constants objectForKey:@"imageServers"] : nil;
-            servers = [available isKindOfClass:[NSArray class]] ? available : nil;
-        }
-        for (NSString *serverID in [NSArray arrayWithObjects:@"compress", @"download", @"secondary", @"main", nil]) {
-            for (NSDictionary *server in servers) {
-                if (![[server objectForKey:@"id"] isEqual:serverID] ||
-                    ![[server objectForKey:@"site_ids"] containsObject:[NSNumber numberWithInt:1]]) {
-                    continue;
-                }
-                NSString *relative = [task objectForKey:@"image_path"];
-                while ([relative hasPrefix:@"/"]) {
-                    relative = [relative substringFromIndex:1];
-                }
-                NSString *url = [NSString stringWithFormat:@"%@/%@", [server objectForKey:@"url"], relative];
-                error = nil;
-                NSData *data = Download(url, &error);
-                retryableFailure = retryableFailure || TransientNetworkError(error);
-                value = data && [UIImage imageWithData:data] ? data : nil;
-                if (value) {
-                    break;
-                }
-                [NSThread sleepForTimeInterval:0.3];
-            }
-            if (value) {
-                break;
-            }
+    if ([kind isEqual:@"servers"]) {
+        id constants = Fetch(@"/constants?fields%5B%5D=imageServers", &error);
+        id available = [constants isKindOfClass:[NSDictionary class]] ? [constants objectForKey:@"imageServers"] : nil;
+        if ([available isKindOfClass:[NSArray class]] && [available count]) {
+            value = available;
         }
     } else if ([kind isEqual:@"chapter"]) {
         NSDictionary *chapter = [task objectForKey:@"chapter"];
@@ -625,42 +802,49 @@ static id Fetch(NSString *path, NSError **error) {
     NSString *message = error ? [error localizedDescription] : @"Нет данных: глава закрыта или формат не поддерживается";
     NSMutableDictionary *result = [NSMutableDictionary dictionaryWithDictionary:task];
     [result setObject:(value ? value : message) forKey:(value ? @"value" : @"error")];
-    if ([kind isEqual:@"image"] && !value && (retryableFailure || TransientNetworkError(error))) {
-        [result setObject:[NSNumber numberWithBool:YES] forKey:@"retryable"];
-    }
-    if (servers) {
-        [result setObject:servers forKey:@"servers"];
-    }
     [self performSelectorOnMainThread:@selector(finish:) withObject:result waitUntilDone:YES];
     [pool drain];
 }
 
 - (void)finish:(NSDictionary *)result {
     NSString *kind = [result objectForKey:@"kind"];
-    if ([kind isEqual:@"image"]) {
-        _imageLoading = NO;
-        NSArray *servers = [result objectForKey:@"servers"];
+    if ([kind isEqual:@"servers"]) {
+        _serversLoading = NO;
+        NSArray *servers = [result objectForKey:@"value"];
         if ([servers count]) {
-            NSArray *replacement = [servers copy];
             [_imageServers release];
-            _imageServers = replacement;
+            _imageServers = [servers copy];
+            [[NSUserDefaults standardUserDefaults] setObject:servers forKey:@"MangaLib6ImageServers"];
         }
+        if (_live && _screen == 2) {
+            if ([_imageServers count]) {
+                [self prefetchPages];
+            } else {
+                _status.text = [NSString stringWithFormat:@"Не удалось получить серверы: %@. Нажми «Прямой API» дважды для повтора.",
+                    [result objectForKey:@"error"]];
+            }
+        }
+        return;
+    }
+    if ([kind isEqual:@"image"]) {
         NSNumber *page = [result objectForKey:@"page_index"];
         NSInteger index = [page integerValue];
         if ([[result objectForKey:@"generation"] unsignedIntegerValue] != _readerGeneration ||
-            !_live || _screen != 2 || _busy || index < _pageIndex || index >= [self bufferEnd]) {
+            !_live || _screen != 2 || _busy || index < [self bufferStart] || index >= [self bufferEnd]) {
             NSLog(@"MangaLib6 buffer discarded page %ld", (long)index + 1);
             [self prefetchPages];
             return;
         }
-        NSData *data = [result objectForKey:@"value"];
-        if (data) {
+        UIImage *image = [result objectForKey:@"value"];
+        if (image) {
             [_pageErrors removeObjectForKey:page];
-            [_pageCache setObject:data forKey:page];
+            [_pageCache setObject:image forKey:page];
             NSLog(@"MangaLib6 buffer stored page %ld: %lu/%ld", (long)index + 1,
-                (unsigned long)[_pageCache count], (long)([self bufferEnd] - _pageIndex));
+                (unsigned long)[_pageCache count], (long)([self bufferEnd] - [self bufferStart]));
+            NSLog(@"MangaLib6 page %ld download time: %.2f seconds", (long)index + 1,
+                -[[result objectForKey:@"started_at"] timeIntervalSinceNow]);
             if (index == _pageIndex) {
-                [self displayPageData:data cacheHit:NO];
+                [self displayPageImage:image cacheHit:NO];
             } else {
                 [self updatePageStatus];
             }
@@ -730,6 +914,7 @@ static id Fetch(NSString *path, NSError **error) {
 }
 
 - (void)dealloc {
+    [self cancelImageDownload];
     [_query release];
     [_status release];
     [_table release];
@@ -742,6 +927,7 @@ static id Fetch(NSString *path, NSError **error) {
     [_pageCache release];
     [_pageErrors release];
     [_imageServers release];
+    [_preferredImageServer release];
     [_slug release];
     [super dealloc];
 }
