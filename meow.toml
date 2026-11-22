@@ -1,0 +1,17 @@
+[project]
+name = "MangaLib6"
+kind = "app"
+archs = ["armv7"]
+min_ios = "5.1"
+info_plist = "Info.plist"
+resources = "Resources"
+frameworks = ["Foundation", "UIKit", "CoreGraphics"]
+cflags = ["-Wall", "-Wextra", "-Wno-unused-parameter"]
+
+[package]
+id = "ru.mangapad.apitest"
+name = "MangaLib6"
+version = "0.1.0"
+description = "Native MangaLib API prototype for iOS 5.1"
+maintainer = "MangaLib6"
+section = "Applications"

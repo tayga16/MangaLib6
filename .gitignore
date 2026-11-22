@@ -1,0 +1,13 @@
+build/
+.snapshot-cache/
+.venv/
+__pycache__/
+*.py[cod]
+*.log
+*.bmp
+*.ipa
+Resources/*
+!Resources/.gitkeep
+.env
+.env.*
+!.env.example
