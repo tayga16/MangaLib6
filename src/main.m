@@ -101,7 +101,6 @@ static id Fetch(NSString *path, NSError **error) {
 @interface MangaLib6Controller : UIViewController <UITableViewDataSource, UITableViewDelegate, UITextFieldDelegate, UIScrollViewDelegate, UIGestureRecognizerDelegate, NSURLConnectionDataDelegate> {
     UITextField *_query;
     UILabel *_status;
-    UIButton *_mode;
     UIButton *_previous;
     UIButton *_next;
     UITableView *_table;
@@ -174,8 +173,7 @@ static id Fetch(NSString *path, NSError **error) {
     _query.returnKeyType = UIReturnKeySearch;
     [self.view addSubview:_query];
     [self button:@"Поиск" action:@selector(search) frame:CGRectMake(width - 104, 12, 92, 36)];
-    _mode = [self button:@"Снимок API" action:@selector(toggleMode) frame:CGRectMake(12, 56, 140, 36)];
-    [self button:@"Назад" action:@selector(goBack) frame:CGRectMake(160, 56, 80, 36)];
+    [self button:@"Назад" action:@selector(goBack) frame:CGRectMake(12, 56, 80, 36)];
     _status = [[UILabel alloc] initWithFrame:CGRectMake(12, 100, width - 24, 64)];
     _status.numberOfLines = 3;
     _status.font = [UIFont systemFontOfSize:15];
@@ -233,7 +231,6 @@ static id Fetch(NSString *path, NSError **error) {
     }
     BOOL smokeTest = [[[NSBundle mainBundle] objectForInfoDictionaryKey:@"MangaLib6SmokeTest"] boolValue];
     _live = !smokeTest;
-    [_mode setTitle:(_live ? @"Прямой API" : @"Снимок API") forState:UIControlStateNormal];
     [self search];
     if (_live) {
         [self refreshImageServers];
@@ -354,7 +351,9 @@ static id Fetch(NSString *path, NSError **error) {
         [self showPage];
     }
     _pageIndex = 0;
-    [self toggleMode];
+    _live = YES;
+    [self search];
+    [self refreshImageServers];
 }
 
 - (void)setItems:(NSArray *)items screen:(NSInteger)screen {
@@ -562,17 +561,6 @@ static id Fetch(NSString *path, NSError **error) {
     return YES;
 }
 
-- (void)toggleMode {
-    if (!_busy) {
-        _live = !_live;
-        [_mode setTitle:(_live ? @"Прямой API" : @"Снимок API") forState:UIControlStateNormal];
-        [self search];
-        if (_live) {
-            [self refreshImageServers];
-        }
-    }
-}
-
 - (void)goBack {
     if (!_busy) {
         if (_screen == 2) {
@@ -614,7 +602,7 @@ static id Fetch(NSString *path, NSError **error) {
     NSDictionary *item = [_items objectAtIndex:indexPath.row];
     if (_screen == 0) {
         if (!_live && ![[item objectForKey:@"slug_url"] isEqual:[[_snapshot objectForKey:@"title"] objectForKey:@"slug_url"]]) {
-            _status.text = [NSString stringWithFormat:@"Для этой манги нет снимка. Выбери %@ или включи Прямой API.", Name([_snapshot objectForKey:@"title"])];
+            _status.text = [NSString stringWithFormat:@"Для этой манги нет снимка. Выбери %@.", Name([_snapshot objectForKey:@"title"])];
             return;
         }
         [self openManga:item];
@@ -1069,7 +1057,7 @@ static id Fetch(NSString *path, NSError **error) {
             if ([_imageServers count]) {
                 [self prefetchPages];
             } else {
-                _status.text = [NSString stringWithFormat:@"Не удалось получить серверы: %@. Нажми «Прямой API» дважды для повтора.",
+                _status.text = [NSString stringWithFormat:@"Не удалось получить серверы: %@. Для повтора вернись к главам и открой главу снова.",
                     [result objectForKey:@"error"]];
             }
         }

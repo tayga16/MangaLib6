@@ -1,0 +1,58 @@
+name: Build IPA
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-ipa-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    env:
+      MEOW_REV: ecc0bb92222395188d70a8caf2e6f75f80ba0fda
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Install host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y libtinfo5
+
+      - name: Install meow
+        run: |
+          cargo install --git https://github.com/sqmrak/meow --rev "$MEOW_REV" --locked --root "$RUNNER_TEMP/meow"
+          echo "$RUNNER_TEMP/meow/bin" >> "$GITHUB_PATH"
+
+      - name: Cache iOS toolchain and SDK
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.local/share/meow/tools
+            ~/.cache/meow
+          key: meow-${{ runner.os }}-${{ runner.arch }}-${{ env.MEOW_REV }}-sdk-6.1-v1
+
+      - name: Set up iOS toolchain and SDK
+        run: |
+          meow setup toolchain
+          meow setup sdks --sdk 6.1
+
+      - name: Build ARMv7 IPA
+        run: meow build MangaLib6-ipa
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: MangaLib6-ipa
+          path: build/*.ipa
+          if-no-files-found: error
+          retention-days: 14
