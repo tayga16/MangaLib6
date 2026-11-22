@@ -6,9 +6,27 @@
     <key>CFBundleIdentifier</key><string>ru.mangapad.apitest</string>
     <key>CFBundleName</key><string>MangaLib6</string>
     <key>CFBundleDisplayName</key><string>MangaLib6</string>
+    <key>CFBundleIconFile</key><string>Icon.png</string>
+    <key>CFBundleIconFiles</key>
+    <array>
+        <string>Icon</string>
+        <string>Icon@2x</string>
+        <string>Icon-Small</string>
+        <string>Icon-Small@2x</string>
+    </array>
+    <key>CFBundleIconFiles~ipad</key>
+    <array>
+        <string>Icon-72</string>
+        <string>Icon-72@2x</string>
+        <string>Icon-Small-50</string>
+        <string>Icon-Small-50@2x</string>
+        <string>Icon-Small</string>
+        <string>Icon-Small@2x</string>
+    </array>
+    <key>UIPrerenderedIcon</key><false/>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleVersion</key><string>1</string>
-    <key>CFBundleShortVersionString</key><string>0.1.0</string>
+    <key>CFBundleVersion</key><string>2</string>
+    <key>CFBundleShortVersionString</key><string>0.2.0</string>
     <key>MinimumOSVersion</key><string>5.1</string>
     <key>UIDeviceFamily</key><array><integer>1</integer><integer>2</integer></array>
     <key>UISupportedInterfaceOrientations</key>

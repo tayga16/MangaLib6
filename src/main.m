@@ -1,4 +1,5 @@
 #import <UIKit/UIKit.h>
+#include <math.h>
 
 static const NSInteger PageBufferSize = 5;
 static const NSInteger PageRetryLimit = 2;
@@ -67,7 +68,7 @@ static id Fetch(NSString *path, NSError **error) {
     return [json isKindOfClass:[NSDictionary class]] ? [json objectForKey:@"data"] : nil;
 }
 
-@interface MangaLib6Controller : UIViewController <UITableViewDataSource, UITableViewDelegate, UITextFieldDelegate, UIScrollViewDelegate> {
+@interface MangaLib6Controller : UIViewController <UITableViewDataSource, UITableViewDelegate, UITextFieldDelegate, UIScrollViewDelegate, UIGestureRecognizerDelegate> {
     UITextField *_query;
     UILabel *_status;
     UIButton *_mode;
@@ -143,6 +144,11 @@ static id Fetch(NSString *path, NSError **error) {
     doubleTap.numberOfTapsRequired = 2;
     [_pageView addGestureRecognizer:doubleTap];
     [doubleTap release];
+    UIPanGestureRecognizer *pageSwipe = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(swipePage:)];
+    pageSwipe.maximumNumberOfTouches = 1;
+    pageSwipe.delegate = self;
+    [_pageView addGestureRecognizer:pageSwipe];
+    [pageSwipe release];
     _previous = [self button:@"< Страница" action:@selector(previousPage) frame:CGRectMake(12, height - 48, 140, 36)];
     _next = [self button:@"Страница >" action:@selector(nextPage) frame:CGRectMake(width - 152, height - 48, 140, 36)];
     NSString *path = [[NSBundle mainBundle] pathForResource:@"snapshot" ofType:@"plist"];
@@ -226,6 +232,44 @@ static id Fetch(NSString *path, NSError **error) {
     CGSize size = CGSizeMake(_pageView.bounds.size.width / scale, _pageView.bounds.size.height / scale);
     [_pageView zoomToRect:CGRectMake(point.x - size.width / 2, point.y - size.height / 2,
         size.width, size.height) animated:YES];
+}
+
+- (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gesture {
+    if (![gesture isKindOfClass:[UIPanGestureRecognizer class]]) {
+        return YES;
+    }
+    if (_screen != 2 || _busy || _pageView.hidden ||
+        _pageView.zoomScale > _pageView.minimumZoomScale + 0.01) {
+        return NO;
+    }
+    return YES;
+}
+
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gesture
+    shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGesture {
+    return gesture == _pageView.panGestureRecognizer || otherGesture == _pageView.panGestureRecognizer;
+}
+
+- (void)swipePage:(UIPanGestureRecognizer *)gesture {
+    if (gesture.state != UIGestureRecognizerStateEnded || ![self gestureRecognizerShouldBegin:gesture]) {
+        return;
+    }
+    CGPoint distance = [gesture translationInView:_pageView];
+    NSLog(@"MangaLib6 swipe distance: %.1f,%.1f", distance.x, distance.y);
+    if (fabs(distance.x) < 80 || fabs(distance.x) < fabs(distance.y) * 1.5) {
+        return;
+    }
+    BOOL forward = distance.x < 0;
+    if ((forward && _pageIndex + 1 >= (NSInteger)[_pages count]) || (!forward && _pageIndex == 0)) {
+        return;
+    }
+    NSLog(@"MangaLib6 swipe %@ page %ld -> %ld (scale=%.2f)", forward ? @"left" : @"right",
+        (long)_pageIndex + 1, (long)_pageIndex + (forward ? 2 : 0), _pageView.zoomScale);
+    if (forward) {
+        [self nextPage];
+    } else {
+        [self previousPage];
+    }
 }
 
 - (void)smokeTest {
