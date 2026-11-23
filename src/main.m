@@ -192,11 +192,45 @@ static id Fetch(NSString *path, NSError **error) {
     return [json isKindOfClass:[NSDictionary class]] ? [json objectForKey:@"data"] : nil;
 }
 
+@interface MangaLib6ProgressBar : UIView {
+    CGFloat _progress;
+}
+@property(nonatomic) CGFloat progress;
+@end
+
+@implementation MangaLib6ProgressBar
+@synthesize progress = _progress;
+- (void)setProgress:(CGFloat)progress {
+    _progress = MAX((CGFloat)0, MIN((CGFloat)1, progress));
+    [self setNeedsDisplay];
+}
+- (void)drawRect:(CGRect)rect {
+    [[UIColor colorWithRed:56.0 / 255 green:56.0 / 255 blue:61.0 / 255 alpha:1] setFill];
+    [[UIBezierPath bezierPathWithRoundedRect:self.bounds cornerRadius:3] fill];
+    if (_progress > 0) {
+        [[UIColor colorWithRed:1 green:171.0 / 255 blue:64.0 / 255 alpha:1] setFill];
+        CGRect fill = self.bounds;
+        fill.size.width *= _progress;
+        [[UIBezierPath bezierPathWithRoundedRect:fill cornerRadius:3] fill];
+    }
+}
+@end
+
 @interface MangaLib6Controller : UIViewController <UITableViewDataSource, UITableViewDelegate, UITextFieldDelegate, UIScrollViewDelegate, UIGestureRecognizerDelegate, NSURLConnectionDataDelegate> {
     UITextField *_query;
     UILabel *_status;
     UIButton *_previous;
     UIButton *_next;
+    UIButton *_resume;
+    UIView *_resumePanel;
+    UILabel *_resumeName;
+    UILabel *_resumeDetails;
+    UIImageView *_resumeCover;
+    MangaLib6ProgressBar *_resumeProgress;
+    NSURLConnection *_resumeConnection;
+    NSMutableData *_resumeData;
+    NSString *_resumeCoverSlug;
+    UIView *_contentView;
     UITableView *_table;
     UIScrollView *_infoView;
     UIImageView *_cover;
@@ -207,6 +241,8 @@ static id Fetch(NSString *path, NSError **error) {
     NSArray *_catalog;
     NSArray *_chapters;
     NSDictionary *_chapter;
+    NSMutableDictionary *_readingProgress;
+    BOOL _resumeRequested;
     BOOL _titleLoaded;
     UIScrollView *_pageView;
     UIImageView *_image;
@@ -250,6 +286,9 @@ static id Fetch(NSString *path, NSError **error) {
 - (void)loadView {
     _pageCache = [[NSMutableDictionary alloc] init];
     _pageErrors = [[NSMutableDictionary alloc] init];
+    id progress = [[NSUserDefaults standardUserDefaults] objectForKey:@"MangaLib6ReadingProgress"];
+    _readingProgress = [progress isKindOfClass:[NSDictionary class]] ?
+        [[NSMutableDictionary alloc] initWithDictionary:progress] : [[NSMutableDictionary alloc] init];
     id savedServers = [[NSUserDefaults standardUserDefaults] objectForKey:@"MangaLib6ImageServers"];
     if ([savedServers isKindOfClass:[NSArray class]]) {
         _imageServers = [savedServers copy];
@@ -304,16 +343,20 @@ static id Fetch(NSString *path, NSError **error) {
     _status.backgroundColor = [UIColor clearColor];
     _status.textColor = ThemeSecondaryText();
     [self.view addSubview:_status];
-    _table = [[UITableView alloc] initWithFrame:CGRectMake(0, contentTop, width, height - contentTop) style:UITableViewStylePlain];
+    _contentView = [[UIView alloc] initWithFrame:CGRectMake(0, contentTop, width, height - contentTop)];
+    _contentView.clipsToBounds = YES;
+    [self.view addSubview:_contentView];
+    _table = [[UITableView alloc] initWithFrame:_contentView.bounds style:UITableViewStylePlain];
     _table.dataSource = self;
     _table.delegate = self;
     _table.backgroundColor = ThemeSurface();
     _table.separatorColor = ThemeBorder();
-    [self.view addSubview:_table];
+    [_contentView addSubview:_table];
     _infoView = [[UIScrollView alloc] initWithFrame:_table.frame];
     _infoView.backgroundColor = ThemeBackground();
     _infoView.hidden = YES;
-    [self.view addSubview:_infoView];
+    [_contentView addSubview:_infoView];
+    [self createResumePanel];
     _cover = [[UIImageView alloc] initWithFrame:CGRectMake((width - 160) / 2, 12, 160, 224)];
     _cover.contentMode = UIViewContentModeScaleAspectFit;
     _cover.backgroundColor = ThemeSurface();
@@ -325,13 +368,13 @@ static id Fetch(NSString *path, NSError **error) {
     _coverStatus.font = [UIFont systemFontOfSize:14];
     _coverStatus.numberOfLines = 0;
     [_infoView addSubview:_coverStatus];
-    _pageView = [[UIScrollView alloc] initWithFrame:CGRectMake(0, contentTop, width, height - contentTop - 60)];
+    _pageView = [[UIScrollView alloc] initWithFrame:CGRectMake(0, 0, width, height - contentTop - 60)];
     _pageView.delegate = self;
     _pageView.backgroundColor = [UIColor colorWithRed:0.15 green:0.08 blue:0.04 alpha:1];
     _pageView.minimumZoomScale = 1;
     _pageView.maximumZoomScale = 4;
     _pageView.hidden = YES;
-    [self.view addSubview:_pageView];
+    [_contentView addSubview:_pageView];
     _image = [[UIImageView alloc] initWithFrame:_pageView.bounds];
     _image.contentMode = UIViewContentModeScaleAspectFit;
     [_pageView addSubview:_image];
@@ -378,7 +421,7 @@ static id Fetch(NSString *path, NSError **error) {
 }
 
 - (void)animateAppearance:(UIView *)view {
-    if (_smoke || !view.window || view.hidden) {
+    if (_smoke || _lowMemory || !view.window || view.hidden) {
         return;
     }
     CATransition *transition = [CATransition animation];
@@ -386,6 +429,28 @@ static id Fetch(NSString *path, NSError **error) {
     transition.duration = 0.18;
     transition.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
     [view.layer addAnimation:transition forKey:@"appearance"];
+}
+
+- (void)animateContentInDirection:(NSInteger)direction {
+    if (_smoke || _lowMemory || !_contentView.window) {
+        return;
+    }
+    CATransition *transition = [CATransition animation];
+    transition.type = kCATransitionPush;
+    transition.subtype = direction > 0 ? kCATransitionFromRight : kCATransitionFromLeft;
+    transition.duration = 0.3;
+    transition.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+    [_contentView.layer addAnimation:transition forKey:@"navigation"];
+}
+
+- (void)animateNavigationToScreen:(NSInteger)screen {
+    if (_screen == screen) {
+        return;
+    }
+    // Search -> information -> chapters -> reader.
+    NSInteger currentDepth = _screen == 3 ? 1 : (_screen == 1 ? 2 : (_screen == 2 ? 3 : 0));
+    NSInteger nextDepth = screen == 3 ? 1 : (screen == 1 ? 2 : (screen == 2 ? 3 : 0));
+    [self animateContentInDirection:nextDepth > currentDepth ? 1 : -1];
 }
 
 - (void)setPageImage:(UIImage *)image {
@@ -410,7 +475,7 @@ static id Fetch(NSString *path, NSError **error) {
 
 - (void)transitionToPageImage:(UIImage *)image {
     BOOL slide = _pageDirection != 0 && _image.image != nil;
-    BOOL animate = image && image != _image.image && !_smoke && !_lowMemory && _pageView.window;
+    BOOL animate = (slide || image) && image != _image.image && !_smoke && !_lowMemory && _pageView.window;
     [self setPageImage:image];
     if (animate) {
         CATransition *transition = [CATransition animation];
@@ -418,7 +483,7 @@ static id Fetch(NSString *path, NSError **error) {
         if (slide) {
             transition.subtype = _pageDirection > 0 ? kCATransitionFromRight : kCATransitionFromLeft;
         }
-        transition.duration = slide ? 0.22 : 0.18;
+        transition.duration = slide ? 0.3 : 0.18;
         transition.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
         [_pageView.layer addAnimation:transition forKey:@"pageTransition"];
     }
@@ -522,6 +587,7 @@ static id Fetch(NSString *path, NSError **error) {
 }
 
 - (void)setItems:(NSArray *)items screen:(NSInteger)screen {
+    [self animateNavigationToScreen:screen];
     [self resetPageBuffer];
     [self cancelCoverDownload];
     NSArray *replacement = [items copy];
@@ -539,6 +605,7 @@ static id Fetch(NSString *path, NSError **error) {
         _chapters = nil;
         _cover.image = nil;
         _titleLoaded = NO;
+        _resumeRequested = NO;
     }
     _table.hidden = NO;
     _infoView.hidden = YES;
@@ -547,7 +614,7 @@ static id Fetch(NSString *path, NSError **error) {
     _previous.hidden = YES;
     _next.hidden = YES;
     [_table reloadData];
-    [self animateAppearance:_table];
+    [self updateResumeButton];
 }
 
 - (CGFloat)infoLabel:(NSString *)text font:(UIFont *)font top:(CGFloat)top left:(CGFloat)left width:(CGFloat)width {
@@ -564,6 +631,8 @@ static id Fetch(NSString *path, NSError **error) {
 }
 
 - (void)showInformation {
+    [self animateNavigationToScreen:3];
+    _table.tableHeaderView = nil;
     [self resetPageBuffer];
     _screen = 3;
     _table.hidden = YES;
@@ -579,6 +648,18 @@ static id Fetch(NSString *path, NSError **error) {
     CGFloat width = _infoView.bounds.size.width;
     CGFloat top = 252;
     top += [self infoLabel:Name(_mangaInfo) font:[UIFont boldSystemFontOfSize:20] top:top left:20 width:width - 40] + 12;
+    NSDictionary *progress = [self savedProgressForSlug:_slug];
+    if (progress) {
+        _resumePanel.frame = CGRectMake(20, top, width - 40, 160);
+        [_infoView addSubview:_resumePanel];
+        top += 172;
+        NSInteger page = [[progress objectForKey:@"page_index"] integerValue];
+        NSInteger count = [[progress objectForKey:@"page_count"] integerValue];
+        NSString *summary = [NSString stringWithFormat:@"Место чтения: том %@, глава %@\nСтраница %ld из %ld. После неё осталось %ld стр. в главе.",
+            [progress objectForKey:@"volume"], [progress objectForKey:@"number"],
+            (long)page + 1, (long)count, (long)MAX((NSInteger)0, count - page - 1)];
+        top += [self infoLabel:summary font:[UIFont systemFontOfSize:15] top:top left:20 width:width - 40] + 12;
+    }
     UIButton *chapters = [UIButton buttonWithType:UIButtonTypeCustom];
     ThemeButton(chapters);
     chapters.frame = CGRectMake(20, top, width - 40, 40);
@@ -630,7 +711,7 @@ static id Fetch(NSString *path, NSError **error) {
     _infoView.contentSize = CGSizeMake(width, top + 8);
     _status.text = _titleLoaded || !_live ? @"Информация о манге" : @"Загружаем информацию о манге…";
     [self loadCover];
-    [self animateAppearance:_infoView];
+    [self updateResumeButton];
 }
 
 - (void)openManga:(NSDictionary *)item {
@@ -659,9 +740,253 @@ static id Fetch(NSString *path, NSError **error) {
         [self setItems:(_live ? _chapters : [_snapshot objectForKey:@"chapters"]) screen:1];
         _status.text = _live ? @"Выбери главу" : [NSString stringWithFormat:@"Снимок: %lu из %@ глав",
             (unsigned long)[_items count], [_snapshot objectForKey:@"total_chapters"]];
+        if (_resumeRequested) {
+            [self resumeSavedChapter];
+        }
     } else {
         NSString *path = [NSString stringWithFormat:@"/manga/%@/chapters", Escape(_slug)];
         [self start:[NSDictionary dictionaryWithObjectsAndKeys:@"chapters", @"kind", path, @"path", nil]];
+    }
+}
+
+- (NSDictionary *)savedProgressForSlug:(NSString *)slug {
+    id progress = [slug isKindOfClass:[NSString class]] ? [_readingProgress objectForKey:slug] : nil;
+    if (![progress isKindOfClass:[NSDictionary class]] ||
+        ![InfoText([progress objectForKey:@"volume"]) length] ||
+        ![InfoText([progress objectForKey:@"number"]) length] ||
+        ![[progress objectForKey:@"page_index"] isKindOfClass:[NSNumber class]] ||
+        ![[progress objectForKey:@"page_count"] isKindOfClass:[NSNumber class]]) {
+        return nil;
+    }
+    NSInteger page = [[progress objectForKey:@"page_index"] integerValue];
+    NSInteger count = [[progress objectForKey:@"page_count"] integerValue];
+    if (page < 0 || count < 1 || page >= count) {
+        return nil;
+    }
+    return progress;
+}
+
+- (NSString *)resumeSlug {
+    if (_screen != 0) {
+        return [self savedProgressForSlug:_slug] ? _slug : nil;
+    }
+    NSString *latest = nil;
+    NSTimeInterval latestTime = 0;
+    for (NSString *slug in _readingProgress) {
+        NSDictionary *progress = [self savedProgressForSlug:slug];
+        NSTimeInterval updated = [InfoText([progress objectForKey:@"updated"]) doubleValue];
+        if (progress && (!latest || updated > latestTime)) {
+            latest = slug;
+            latestTime = updated;
+        }
+    }
+    return latest;
+}
+
+- (void)createResumePanel {
+    _resumePanel = [[UIView alloc] initWithFrame:CGRectMake(0, 0, _table.bounds.size.width, 176)];
+    _resumePanel.backgroundColor = [UIColor colorWithWhite:28.0 / 255 alpha:1];
+    _resumePanel.layer.cornerRadius = 10;
+    _resumePanel.hidden = YES;
+    UILabel *heading = [[[UILabel alloc] initWithFrame:CGRectMake(16, 8, _resumePanel.bounds.size.width - 32, 28)] autorelease];
+    heading.text = @"Продолжить читать";
+    heading.font = [UIFont boldSystemFontOfSize:20];
+    heading.textColor = [UIColor colorWithWhite:0.85 alpha:1];
+    heading.backgroundColor = [UIColor clearColor];
+    heading.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    [_resumePanel addSubview:heading];
+    _resume = [UIButton buttonWithType:UIButtonTypeCustom];
+    _resume.frame = CGRectMake(16, 44, _resumePanel.bounds.size.width - 32, 112);
+    _resume.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    [_resume setBackgroundImage:ThemeBackgroundImage([UIColor colorWithRed:37.0 / 255 green:37.0 / 255 blue:39.0 / 255 alpha:1],
+        [UIColor colorWithRed:37.0 / 255 green:37.0 / 255 blue:39.0 / 255 alpha:1], [UIColor colorWithWhite:0.16 alpha:1])
+        forState:UIControlStateNormal];
+    [_resume setBackgroundImage:ThemeBackgroundImage([UIColor colorWithWhite:0.23 alpha:1],
+        [UIColor colorWithWhite:0.23 alpha:1], [UIColor colorWithWhite:0.28 alpha:1]) forState:UIControlStateHighlighted];
+    [_resume addTarget:self action:@selector(continueReading) forControlEvents:UIControlEventTouchUpInside];
+    [_resumePanel addSubview:_resume];
+    _resumeCover = [[UIImageView alloc] initWithFrame:CGRectMake(8, 10, 60, 92)];
+    _resumeCover.contentMode = UIViewContentModeScaleAspectFill;
+    _resumeCover.clipsToBounds = YES;
+    _resumeCover.layer.cornerRadius = 4;
+    _resumeCover.backgroundColor = [UIColor colorWithWhite:0.2 alpha:1];
+    [_resume addSubview:_resumeCover];
+    _resumeName = [[UILabel alloc] initWithFrame:CGRectMake(80, 10, _resume.bounds.size.width - 96, 44)];
+    _resumeName.font = [UIFont boldSystemFontOfSize:15];
+    _resumeName.textColor = [UIColor colorWithWhite:0.8 alpha:1];
+    _resumeName.backgroundColor = [UIColor clearColor];
+    _resumeName.numberOfLines = 2;
+    _resumeName.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    [_resume addSubview:_resumeName];
+    _resumeDetails = [[UILabel alloc] initWithFrame:CGRectMake(80, 62, _resume.bounds.size.width - 96, 22)];
+    _resumeDetails.font = [UIFont systemFontOfSize:13];
+    _resumeDetails.textColor = [UIColor colorWithRed:136.0 / 255 green:136.0 / 255 blue:142.0 / 255 alpha:1];
+    _resumeDetails.backgroundColor = [UIColor clearColor];
+    _resumeDetails.adjustsFontSizeToFitWidth = YES;
+    _resumeDetails.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    [_resume addSubview:_resumeDetails];
+    _resumeProgress = [[MangaLib6ProgressBar alloc] initWithFrame:CGRectMake(80, 94, _resume.bounds.size.width - 96, 6)];
+    _resumeProgress.backgroundColor = [UIColor clearColor];
+    _resumeProgress.contentMode = UIViewContentModeRedraw;
+    _resumeProgress.userInteractionEnabled = NO;
+    _resumeProgress.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    [_resume addSubview:_resumeProgress];
+}
+
+- (void)cancelResumeCoverDownload {
+    [_resumeConnection cancel];
+    [_resumeConnection release];
+    _resumeConnection = nil;
+    [_resumeData release];
+    _resumeData = nil;
+}
+
+- (void)loadResumeCoverForSlug:(NSString *)slug progress:(NSDictionary *)progress {
+    if ([slug isEqual:_resumeCoverSlug] && (_resumeConnection || _resumeCover.image)) {
+        return;
+    }
+    [self cancelResumeCoverDownload];
+    [_resumeCoverSlug release];
+    _resumeCoverSlug = [slug copy];
+    _resumeCover.image = nil;
+    _resumeCover.contentMode = UIViewContentModeScaleAspectFill;
+    if ([slug isEqual:_slug] && _cover.image) {
+        _resumeCover.image = _cover.image;
+        return;
+    }
+    NSString *url = InfoText([progress objectForKey:@"cover_url"]);
+    if (!_live || ![url hasPrefix:@"https://"] || ![[NSURL URLWithString:url] host]) {
+        _resumeCover.contentMode = UIViewContentModeScaleAspectFit;
+        _resumeCover.image = [UIImage imageNamed:@"Icon.png"];
+        return;
+    }
+    _resumeCover.contentMode = UIViewContentModeScaleAspectFill;
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:url]
+        cachePolicy:NSURLRequestUseProtocolCachePolicy timeoutInterval:ImageRequestTimeout];
+    [request setValue:@"https://mangalib.me/" forHTTPHeaderField:@"Referer"];
+    [request setValue:@"1" forHTTPHeaderField:@"Site-Id"];
+    _resumeData = [[NSMutableData alloc] init];
+    _resumeConnection = [[NSURLConnection alloc] initWithRequest:request delegate:self startImmediately:NO];
+    [_resumeConnection scheduleInRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+    [_resumeConnection start];
+}
+
+- (void)updateResumeButton {
+    NSDictionary *progress = [self savedProgressForSlug:[self resumeSlug]];
+    BOOL visible = _screen != 2 && progress != nil;
+    _resumePanel.hidden = !visible;
+    _resume.enabled = !_busy;
+    _resume.alpha = _busy ? 0.6 : 1;
+    if (_screen == 0 || _screen == 1) {
+        if (visible) {
+            _resumePanel.frame = CGRectMake(0, 0, _table.bounds.size.width, 176);
+            _table.tableHeaderView = _resumePanel;
+        } else {
+            _table.tableHeaderView = nil;
+        }
+    }
+    if (!visible) {
+        [self cancelResumeCoverDownload];
+        _resumeCover.image = nil;
+        return;
+    }
+    _resumeName.text = InfoText([progress objectForKey:@"name"]);
+    _resumeDetails.text = [NSString stringWithFormat:@"Глава %@ · %ld из %ld стр.",
+        [progress objectForKey:@"number"], (long)[[progress objectForKey:@"page_index"] integerValue] + 1,
+        (long)[[progress objectForKey:@"page_count"] integerValue]];
+    _resumeProgress.progress = (float)([[progress objectForKey:@"page_index"] integerValue] + 1) /
+        [[progress objectForKey:@"page_count"] integerValue];
+    _resume.accessibilityLabel = [NSString stringWithFormat:@"Продолжить читать. %@. %@",
+        _resumeName.text, _resumeDetails.text];
+    [self loadResumeCoverForSlug:[self resumeSlug] progress:progress];
+}
+
+- (void)saveReadingProgress {
+    // Save only a page that has actually appeared, never a pending or failed request.
+    if (_smoke || _screen != 2 || !_image.image || ![_slug length] || !_chapter || ![_pages count]) {
+        return;
+    }
+    NSString *volume = InfoText([_chapter objectForKey:@"volume"]);
+    NSString *number = InfoText([_chapter objectForKey:@"number"]);
+    if (![volume length] || ![number length]) {
+        return;
+    }
+    NSMutableDictionary *progress = [NSMutableDictionary dictionaryWithObjectsAndKeys:
+        volume, @"volume", number, @"number", Name(_mangaInfo), @"name",
+        [NSNumber numberWithInteger:_pageIndex], @"page_index",
+        [NSNumber numberWithUnsignedInteger:[_pages count]], @"page_count",
+        [NSNumber numberWithDouble:[[NSDate date] timeIntervalSince1970]], @"updated", nil];
+    id cover = [_mangaInfo objectForKey:@"cover"];
+    NSString *coverURL = [cover isKindOfClass:[NSDictionary class]] ? InfoText([cover objectForKey:@"thumbnail"]) : @"";
+    if (![coverURL length] && [cover isKindOfClass:[NSDictionary class]]) {
+        coverURL = InfoText([cover objectForKey:@"md"]);
+    }
+    if (![coverURL length] && [cover isKindOfClass:[NSDictionary class]]) {
+        coverURL = InfoText([cover objectForKey:@"default"]);
+    }
+    if (![coverURL length]) {
+        coverURL = InfoText([[self savedProgressForSlug:_slug] objectForKey:@"cover_url"]);
+    }
+    if ([coverURL hasPrefix:@"https://"]) {
+        [progress setObject:coverURL forKey:@"cover_url"];
+    }
+    [_readingProgress setObject:progress forKey:_slug];
+    [[NSUserDefaults standardUserDefaults] setObject:_readingProgress forKey:@"MangaLib6ReadingProgress"];
+}
+
+- (void)flushReadingProgress {
+    [self saveReadingProgress];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+}
+
+- (void)continueReading {
+    if (_busy || _screen == 2) {
+        return;
+    }
+    NSString *slug = [self resumeSlug];
+    NSDictionary *progress = [self savedProgressForSlug:slug];
+    if (!progress) {
+        return;
+    }
+    _resumeRequested = YES;
+    if (_screen == 0) {
+        [self openManga:[NSDictionary dictionaryWithObjectsAndKeys:slug, @"slug_url",
+            [progress objectForKey:@"name"] ?: @"Манга", @"name", nil]];
+        if (!_live) {
+            [self openChapters];
+        }
+    } else {
+        [self openChapters];
+    }
+}
+
+- (void)resumeSavedChapter {
+    NSDictionary *progress = [self savedProgressForSlug:_slug];
+    NSDictionary *selected = nil;
+    for (NSDictionary *chapter in _items) {
+        if ([InfoText([chapter objectForKey:@"volume"]) isEqual:[progress objectForKey:@"volume"]] &&
+            [InfoText([chapter objectForKey:@"number"]) isEqual:[progress objectForKey:@"number"]]) {
+            selected = chapter;
+            break;
+        }
+    }
+    _resumeRequested = NO;
+    if (!selected) {
+        _status.text = @"Сохранённая глава сейчас недоступна. Выбери другую главу.";
+        return;
+    }
+    if (_live) {
+        [self start:[NSDictionary dictionaryWithObjectsAndKeys:@"chapter", @"kind", selected, @"chapter",
+            _slug, @"slug", [progress objectForKey:@"page_index"], @"resume_page", nil]];
+    } else {
+        [self resetPageBuffer];
+        [_chapter release];
+        _chapter = [selected copy];
+        [_pages release];
+        _pages = [[[_snapshot objectForKey:@"chapter"] objectForKey:@"pages"] copy];
+        _pageIndex = MIN(MAX((NSInteger)0, [[progress objectForKey:@"page_index"] integerValue]),
+            MAX((NSInteger)0, (NSInteger)[_pages count] - 1));
+        [self showPage];
     }
 }
 
@@ -707,6 +1032,7 @@ static id Fetch(NSString *path, NSError **error) {
 
 - (void)start:(NSDictionary *)task {
     _busy = YES;
+    [self updateResumeButton];
     if (_screen == 2) {
         [self updatePageControls];
     }
@@ -718,6 +1044,7 @@ static id Fetch(NSString *path, NSError **error) {
     if (_busy) {
         return;
     }
+    [self flushReadingProgress];
     [self resetPageBuffer];
     [_query resignFirstResponder];
     if (_live) {
@@ -737,6 +1064,7 @@ static id Fetch(NSString *path, NSError **error) {
 
 - (void)goBack {
     if (!_busy) {
+        [self flushReadingProgress];
         if (_screen == 2) {
             [self setItems:_items screen:1];
             _status.text = @"Выбери главу";
@@ -781,10 +1109,20 @@ static id Fetch(NSString *path, NSError **error) {
     cell.textLabel.text = _screen == 0 ? Name(item) : [NSString stringWithFormat:@"Том %@, глава %@ — %@",
         [item objectForKey:@"volume"], [item objectForKey:@"number"], Name(item)];
     if (_screen == 0) {
-        cell.detailTextLabel.text = [item objectForKey:@"slug_url"];
+        NSDictionary *progress = [self savedProgressForSlug:[item objectForKey:@"slug_url"]];
+        cell.detailTextLabel.text = progress ? [NSString stringWithFormat:@"Место чтения: глава %@, стр. %ld/%ld",
+            [progress objectForKey:@"number"], (long)[[progress objectForKey:@"page_index"] integerValue] + 1,
+            (long)[[progress objectForKey:@"page_count"] integerValue]] : [item objectForKey:@"slug_url"];
     } else {
         NSString *date = ChapterPublicationDate(item);
-        cell.detailTextLabel.text = [date length] ? [NSString stringWithFormat:@"Опубликована: %@", date] : @"Дата публикации не указана";
+        NSDictionary *progress = [self savedProgressForSlug:_slug];
+        BOOL savedChapter = [InfoText([item objectForKey:@"volume"]) isEqual:[progress objectForKey:@"volume"]] &&
+            [InfoText([item objectForKey:@"number"]) isEqual:[progress objectForKey:@"number"]];
+        cell.detailTextLabel.text = savedChapter ? [NSString stringWithFormat:@"Место чтения: стр. %ld/%ld%@",
+            (long)[[progress objectForKey:@"page_index"] integerValue] + 1,
+            (long)[[progress objectForKey:@"page_count"] integerValue],
+            [date length] ? [NSString stringWithFormat:@" · %@", date] : @""] :
+            ([date length] ? [NSString stringWithFormat:@"Опубликована: %@", date] : @"Дата публикации не указана");
     }
     return cell;
 }
@@ -802,9 +1140,15 @@ static id Fetch(NSString *path, NSError **error) {
         }
         [self openManga:item];
     } else if (_live) {
-        [self start:[NSDictionary dictionaryWithObjectsAndKeys:@"chapter", @"kind", item, @"chapter", _slug, @"slug", nil]];
+        NSDictionary *progress = [self savedProgressForSlug:_slug];
+        BOOL savedChapter = [InfoText([item objectForKey:@"volume"]) isEqual:[progress objectForKey:@"volume"]] &&
+            [InfoText([item objectForKey:@"number"]) isEqual:[progress objectForKey:@"number"]];
+        [self start:[NSDictionary dictionaryWithObjectsAndKeys:@"chapter", @"kind", item, @"chapter", _slug, @"slug",
+            savedChapter ? [progress objectForKey:@"page_index"] : [NSNumber numberWithInteger:0], @"resume_page", nil]];
     } else {
         [self resetPageBuffer];
+        [_chapter release];
+        _chapter = [item copy];
         [_pages release];
         _pages = [[[_snapshot objectForKey:@"chapter"] objectForKey:@"pages"] copy];
         _pageIndex = 0;
@@ -817,7 +1161,9 @@ static id Fetch(NSString *path, NSError **error) {
         _status.text = @"Нет доступных страниц";
         return;
     }
+    [self animateNavigationToScreen:2];
     _screen = 2;
+    [self updateResumeButton];
     [self cancelCoverDownload];
     _infoView.hidden = YES;
     _table.hidden = YES;
@@ -835,7 +1181,7 @@ static id Fetch(NSString *path, NSError **error) {
         if (image) {
             [self displayPageImage:image cacheHit:YES];
         } else {
-            [self setPageImage:nil];
+            [self transitionToPageImage:nil];
             if (_imageTask && [[_imageTask objectForKey:@"page_index"] integerValue] != _pageIndex) {
                 [self cancelImageDownload];
             }
@@ -846,6 +1192,7 @@ static id Fetch(NSString *path, NSError **error) {
         NSString *filename = [[_snapshot objectForKey:@"image_files"] objectForKey:pagePath];
         NSString *path = filename ? [[[NSBundle mainBundle] bundlePath] stringByAppendingPathComponent:filename] : nil;
         [self transitionToPageImage:(path ? [UIImage imageWithContentsOfFile:path] : nil)];
+        [self saveReadingProgress];
         _status.text = _image.image ? [NSString stringWithFormat:@"Снимок: страница %ld/%lu (в главе %@)",
             (long)_pageIndex + 1, (unsigned long)[_pages count], [_snapshot objectForKey:@"total_pages"]] : @"Картинка не найдена";
         NSLog(@"MangaLib6 snapshot page %ld: %@ decoded=%@", (long)_pageIndex + 1, filename, _image.image ? @"YES" : @"NO");
@@ -931,6 +1278,7 @@ static id Fetch(NSString *path, NSError **error) {
 
 - (void)displayPageImage:(UIImage *)image cacheHit:(BOOL)cacheHit {
     [self transitionToPageImage:image];
+    [self saveReadingProgress];
     [self updatePageStatus];
     NSLog(@"MangaLib6 live page %ld: decoded=%@ cacheHit=%@", (long)_pageIndex + 1,
         _image.image ? @"YES" : @"NO", cacheHit ? @"YES" : @"NO");
@@ -996,6 +1344,9 @@ static id Fetch(NSString *path, NSError **error) {
 
 - (void)didReceiveMemoryWarning {
     [super didReceiveMemoryWarning];
+    [self cancelResumeCoverDownload];
+    _resumeCover.image = nil;
+    [_contentView.layer removeAnimationForKey:@"navigation"];
     [_pageView.layer removeAnimationForKey:@"pageTransition"];
     [_table.layer removeAnimationForKey:@"appearance"];
     [_infoView.layer removeAnimationForKey:@"appearance"];
@@ -1139,6 +1490,16 @@ static id Fetch(NSString *path, NSError **error) {
 }
 
 - (void)connection:(NSURLConnection *)connection didReceiveResponse:(NSURLResponse *)response {
+    if (connection == _resumeConnection) {
+        NSInteger status = [response isKindOfClass:[NSHTTPURLResponse class]] ? [(NSHTTPURLResponse *)response statusCode] : 0;
+        if (status < 200 || status >= 300) {
+            [self cancelResumeCoverDownload];
+            _resumeCover.image = [UIImage imageNamed:@"Icon.png"];
+        } else {
+            [_resumeData setLength:0];
+        }
+        return;
+    }
     if (connection == _coverConnection) {
         NSInteger status = [response isKindOfClass:[NSHTTPURLResponse class]] ? [(NSHTTPURLResponse *)response statusCode] : 0;
         if (status < 200 || status >= 300) {
@@ -1163,6 +1524,10 @@ static id Fetch(NSString *path, NSError **error) {
 }
 
 - (void)connection:(NSURLConnection *)connection didReceiveData:(NSData *)data {
+    if (connection == _resumeConnection) {
+        [_resumeData appendData:data];
+        return;
+    }
     if (connection == _coverConnection) {
         [_coverData appendData:data];
         return;
@@ -1173,6 +1538,11 @@ static id Fetch(NSString *path, NSError **error) {
 }
 
 - (void)connection:(NSURLConnection *)connection didFailWithError:(NSError *)error {
+    if (connection == _resumeConnection) {
+        [self cancelResumeCoverDownload];
+        _resumeCover.image = [UIImage imageNamed:@"Icon.png"];
+        return;
+    }
     if (connection == _coverConnection) {
         [self cancelCoverDownload];
         _coverStatus.text = @"Не удалось\nзагрузить обложку";
@@ -1184,6 +1554,12 @@ static id Fetch(NSString *path, NSError **error) {
 }
 
 - (void)connectionDidFinishLoading:(NSURLConnection *)connection {
+    if (connection == _resumeConnection) {
+        _resumeCover.image = [UIImage imageWithData:_resumeData] ?: [UIImage imageNamed:@"Icon.png"];
+        [self cancelResumeCoverDownload];
+        [self animateAppearance:_resumeCover];
+        return;
+    }
     if (connection == _coverConnection) {
         _cover.image = [UIImage imageWithData:_coverData];
         _coverStatus.hidden = _cover.image != nil;
@@ -1334,7 +1710,14 @@ static id Fetch(NSString *path, NSError **error) {
         return;
     }
     _busy = NO;
+    [self updateResumeButton];
     if ([result objectForKey:@"error"]) {
+        // Reading does not depend on optional title metadata being available.
+        if ([kind isEqual:@"title"] && _resumeRequested) {
+            [self openChapters];
+            return;
+        }
+        _resumeRequested = NO;
         if (_screen == 2) {
             [self updatePageControls];
         }
@@ -1351,7 +1734,7 @@ static id Fetch(NSString *path, NSError **error) {
         _mangaInfo = [title copy];
         _titleLoaded = YES;
         [self showInformation];
-        if (_smoke) {
+        if (_smoke || _resumeRequested) {
             [self openChapters];
         }
     } else if ([kind isEqual:@"catalog"] || [kind isEqual:@"chapters"]) {
@@ -1363,6 +1746,9 @@ static id Fetch(NSString *path, NSError **error) {
         _status.text = [NSString stringWithFormat:@"Прямой API: %lu %@", (unsigned long)[_items count],
             _screen == 0 ? @"результатов" : @"глав"];
         NSLog(@"MangaLib6 live %@: %lu items", kind, (unsigned long)[_items count]);
+        if ([kind isEqual:@"chapters"] && _resumeRequested) {
+            [self resumeSavedChapter];
+        }
         if (_smoke) {
             NSDictionary *selected = nil;
             for (NSDictionary *item in _items) {
@@ -1384,18 +1770,29 @@ static id Fetch(NSString *path, NSError **error) {
             }
         }
     } else if ([kind isEqual:@"chapter"]) {
+        if (_screen == 2) {
+            [self animateContentInDirection:1];
+        }
         [self resetPageBuffer];
         [_chapter release];
         _chapter = [[result objectForKey:@"chapter"] copy];
         [_pages release];
         _pages = [value copy];
         NSLog(@"MangaLib6 live chapter: %lu pages", (unsigned long)[_pages count]);
-        _pageIndex = 0;
+        _pageIndex = MIN(MAX((NSInteger)0, [[result objectForKey:@"resume_page"] integerValue]),
+            MAX((NSInteger)0, (NSInteger)[_pages count] - 1));
         [self showPage];
     }
 }
 
 - (void)dealloc {
+    [self cancelResumeCoverDownload];
+    [_resumePanel release];
+    [_resumeName release];
+    [_resumeDetails release];
+    [_resumeCover release];
+    [_resumeProgress release];
+    [_resumeCoverSlug release];
     [self cancelImageDownload];
     [self cancelCoverDownload];
     [_infoView release];
@@ -1405,9 +1802,11 @@ static id Fetch(NSString *path, NSError **error) {
     [_catalog release];
     [_chapters release];
     [_chapter release];
+    [_readingProgress release];
     [_query release];
     [_status release];
     [_table release];
+    [_contentView release];
     _pageView.delegate = nil;
     [_pageView release];
     [_image release];
@@ -1430,6 +1829,15 @@ static id Fetch(NSString *path, NSError **error) {
 @end
 
 @implementation MangaLib6AppDelegate
+- (void)applicationWillResignActive:(UIApplication *)application {
+    [_controller flushReadingProgress];
+}
+- (void)applicationDidEnterBackground:(UIApplication *)application {
+    [_controller flushReadingProgress];
+}
+- (void)applicationWillTerminate:(UIApplication *)application {
+    [_controller flushReadingProgress];
+}
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)options {
     _window = [[UIWindow alloc] initWithFrame:[[UIScreen mainScreen] bounds]];
     _controller = [[MangaLib6Controller alloc] init];

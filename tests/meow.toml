@@ -1,0 +1,10 @@
+[project]
+name = "MangaLib6ProgressTests"
+kind = "app"
+archs = ["armv7"]
+min_ios = "5.1"
+info_plist = "Info.plist"
+resources = "../Resources"
+src = ["reading_progress.m"]
+frameworks = ["Foundation", "UIKit", "CoreGraphics", "QuartzCore"]
+cflags = ["-Wall", "-Wextra", "-Wno-unused-parameter"]
