@@ -5,6 +5,8 @@
 static const NSInteger PageBufferSize = 5;
 static const NSInteger PageHistorySize = 2;
 static const NSInteger PageRetryLimit = 2;
+static const NSUInteger SearchHistoryLimit = 20;
+static NSString *const SearchHistoryKey = @"MangaLib6SearchHistory";
 static const NSTimeInterval ImageRequestTimeout = 8;
 
 static UIColor *ThemeAccent(void) {
@@ -242,6 +244,8 @@ static id Fetch(NSString *path, NSError **error) {
     NSArray *_chapters;
     NSDictionary *_chapter;
     NSMutableDictionary *_readingProgress;
+    NSMutableArray *_searchHistory;
+    BOOL _showingSearchHistory;
     BOOL _resumeRequested;
     BOOL _titleLoaded;
     UIScrollView *_pageView;
@@ -289,6 +293,7 @@ static id Fetch(NSString *path, NSError **error) {
     id progress = [[NSUserDefaults standardUserDefaults] objectForKey:@"MangaLib6ReadingProgress"];
     _readingProgress = [progress isKindOfClass:[NSDictionary class]] ?
         [[NSMutableDictionary alloc] initWithDictionary:progress] : [[NSMutableDictionary alloc] init];
+    [self loadSearchHistory];
     id savedServers = [[NSUserDefaults standardUserDefaults] objectForKey:@"MangaLib6ImageServers"];
     if ([savedServers isKindOfClass:[NSArray class]]) {
         _imageServers = [savedServers copy];
@@ -330,13 +335,16 @@ static id Fetch(NSString *path, NSError **error) {
     _query.contentVerticalAlignment = UIControlContentVerticalAlignmentCenter;
     _query.leftView = [[[UIView alloc] initWithFrame:CGRectMake(0, 0, 10, 36)] autorelease];
     _query.leftViewMode = UITextFieldViewModeAlways;
-    _query.text = @"chainsaw";
+    _query.text = @"";
     _query.placeholder = @"Поиск манги";
+    _query.clearButtonMode = UITextFieldViewModeWhileEditing;
+    _query.autocorrectionType = UITextAutocorrectionTypeNo;
     _query.delegate = self;
     _query.returnKeyType = UIReturnKeySearch;
     [self.view addSubview:_query];
     [self button:@"Поиск" action:@selector(search) frame:CGRectMake(width - 104, headerHeight + 12, 92, 36)];
     [self button:@"Назад" action:@selector(goBack) frame:CGRectMake(12, headerHeight + 56, 80, 36)];
+    [self button:@"История" action:@selector(showSearchHistory) frame:CGRectMake(104, headerHeight + 56, 100, 36)];
     _status = [[UILabel alloc] initWithFrame:CGRectMake(12, headerHeight + 100, width - 24, 64)];
     _status.numberOfLines = 3;
     _status.font = [UIFont systemFontOfSize:15];
@@ -394,17 +402,18 @@ static id Fetch(NSString *path, NSError **error) {
     id snapshot = path ? [NSDictionary dictionaryWithContentsOfFile:path] : nil;
     if ([snapshot isKindOfClass:[NSDictionary class]]) {
         _snapshot = [snapshot retain];
-        id query = [_snapshot objectForKey:@"query"];
-        if ([query isKindOfClass:[NSString class]] && [query length]) {
-            _query.text = query;
-        }
         NSLog(@"MangaLib6 snapshot loaded: %@", [_snapshot objectForKey:@"captured_at"]);
     } else {
         NSLog(@"MangaLib6 no snapshot");
     }
     BOOL smokeTest = [[[NSBundle mainBundle] objectForInfoDictionaryKey:@"MangaLib6SmokeTest"] boolValue];
     _live = !smokeTest;
-    [self search];
+    if (smokeTest) {
+        _query.text = InfoText([_snapshot objectForKey:@"query"]);
+        [self search];
+    } else {
+        [self showSearchHistory];
+    }
     if (_live) {
         [self refreshImageServers];
     }
@@ -596,6 +605,7 @@ static id Fetch(NSString *path, NSError **error) {
     [_chapter release];
     _chapter = nil;
     _screen = screen;
+    _showingSearchHistory = NO;
     if (screen == 0) {
         [_catalog release];
         _catalog = [_items copy];
@@ -1044,16 +1054,118 @@ static id Fetch(NSString *path, NSError **error) {
     if (_busy) {
         return;
     }
+    NSString *query = [_query.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (![query length]) {
+        [self showSearchHistory];
+        return;
+    }
+    _query.text = query;
     [self flushReadingProgress];
     [self resetPageBuffer];
     [_query resignFirstResponder];
+    if (!_smoke && _live) {
+        [self rememberSearchQuery:query];
+    }
+    [self setItems:nil screen:0];
     if (_live) {
-        NSString *path = [NSString stringWithFormat:@"/manga?site_id%%5B%%5D=1&q=%@&per_page=20", Escape(_query.text)];
+        NSString *path = [NSString stringWithFormat:@"/manga?site_id%%5B%%5D=1&q=%@&per_page=20", Escape(query)];
         [self start:[NSDictionary dictionaryWithObjectsAndKeys:@"catalog", @"kind", path, @"path", nil]];
     } else {
         [self setItems:[_snapshot objectForKey:@"catalog"] screen:0];
         _status.text = _snapshot ? [NSString stringWithFormat:@"Снимок реального API: %@. Открывается выбранная манга и одна глава; это не живая сеть.",
             [_snapshot objectForKey:@"query"]] : @"Нет снимка: запусти fetch_snapshot.py и пересобери IPA.";
+    }
+}
+
+- (void)loadSearchHistory {
+    [_searchHistory release];
+    _searchHistory = [[NSMutableArray alloc] init];
+    id saved = [[NSUserDefaults standardUserDefaults] objectForKey:SearchHistoryKey];
+    if (![saved isKindOfClass:[NSArray class]]) {
+        return;
+    }
+    for (id entry in saved) {
+        if (![entry isKindOfClass:[NSString class]]) {
+            continue;
+        }
+        NSString *query = [entry stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (![query length]) {
+            continue;
+        }
+        BOOL duplicate = NO;
+        for (NSString *existing in _searchHistory) {
+            if ([existing caseInsensitiveCompare:query] == NSOrderedSame) {
+                duplicate = YES;
+                break;
+            }
+        }
+        if (!duplicate) {
+            [_searchHistory addObject:query];
+        }
+        if ([_searchHistory count] == SearchHistoryLimit) {
+            break;
+        }
+    }
+}
+
+- (void)persistSearchHistory {
+    [[NSUserDefaults standardUserDefaults] setObject:_searchHistory forKey:SearchHistoryKey];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+}
+
+- (void)rememberSearchQuery:(NSString *)query {
+    query = [query stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (![query length]) {
+        return;
+    }
+    if (!_searchHistory) {
+        [self loadSearchHistory];
+    }
+    // Copy before removing a matching entry: query may come from this array.
+    NSString *remembered = [query copy];
+    for (NSInteger index = (NSInteger)[_searchHistory count] - 1; index >= 0; index--) {
+        if ([[_searchHistory objectAtIndex:index] caseInsensitiveCompare:remembered] == NSOrderedSame) {
+            [_searchHistory removeObjectAtIndex:index];
+        }
+    }
+    [_searchHistory insertObject:remembered atIndex:0];
+    [remembered release];
+    while ([_searchHistory count] > SearchHistoryLimit) {
+        [_searchHistory removeLastObject];
+    }
+    [self persistSearchHistory];
+}
+
+- (void)updateSearchHistoryStatus {
+    _status.text = [_searchHistory count] ? @"Выбери прошлый запрос или введи новый. Свайп влево удаляет запись." :
+        @"История поиска пока пуста. Введи название манги.";
+}
+
+- (void)showSearchHistory {
+    if (_busy) {
+        return;
+    }
+    [self flushReadingProgress];
+    [self setItems:_catalog screen:0];
+    _showingSearchHistory = YES;
+    [_table reloadData];
+    [_table setContentOffset:CGPointZero animated:NO];
+    [self updateSearchHistoryStatus];
+}
+
+- (void)clearSearchHistory {
+    if (_busy || !_showingSearchHistory) {
+        return;
+    }
+    [_searchHistory removeAllObjects];
+    [self persistSearchHistory];
+    [_table reloadData];
+    [self updateSearchHistoryStatus];
+}
+
+- (void)textFieldDidBeginEditing:(UITextField *)textField {
+    if (textField == _query) {
+        [self showSearchHistory];
     }
 }
 
@@ -1074,13 +1186,64 @@ static id Fetch(NSString *path, NSError **error) {
             [self setItems:_catalog screen:0];
             _status.text = @"Выбери мангу";
         } else {
-            [self search];
+            [self showSearchHistory];
         }
     }
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-    return [_items count];
+    return _showingSearchHistory ? [_searchHistory count] : [_items count];
+}
+
+- (UIView *)tableView:(UITableView *)tableView viewForHeaderInSection:(NSInteger)section {
+    if (!_showingSearchHistory) {
+        return nil;
+    }
+    CGFloat width = tableView.bounds.size.width;
+    UIView *header = [[[UIView alloc] initWithFrame:CGRectMake(0, 0, width, 44)] autorelease];
+    header.backgroundColor = ThemeBackground();
+    UILabel *title = [[[UILabel alloc] initWithFrame:CGRectMake(12, 0, width - 124, 44)] autorelease];
+    title.text = @"История поиска";
+    title.font = [UIFont boldSystemFontOfSize:17];
+    title.textColor = ThemeText();
+    title.backgroundColor = [UIColor clearColor];
+    title.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    [header addSubview:title];
+    if ([_searchHistory count]) {
+        UIButton *clear = [UIButton buttonWithType:UIButtonTypeCustom];
+        clear.frame = CGRectMake(width - 104, 5, 92, 34);
+        clear.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
+        ThemeButton(clear);
+        [clear setTitle:@"Очистить" forState:UIControlStateNormal];
+        clear.enabled = !_busy;
+        [clear addTarget:self action:@selector(clearSearchHistory) forControlEvents:UIControlEventTouchUpInside];
+        [header addSubview:clear];
+    }
+    return header;
+}
+
+- (CGFloat)tableView:(UITableView *)tableView heightForHeaderInSection:(NSInteger)section {
+    return _showingSearchHistory ? 44 : 0;
+}
+
+- (BOOL)tableView:(UITableView *)tableView canEditRowAtIndexPath:(NSIndexPath *)indexPath {
+    return _showingSearchHistory && !_busy;
+}
+
+- (NSString *)tableView:(UITableView *)tableView titleForDeleteConfirmationButtonForRowAtIndexPath:(NSIndexPath *)indexPath {
+    return @"Удалить";
+}
+
+- (void)tableView:(UITableView *)tableView commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
+    forRowAtIndexPath:(NSIndexPath *)indexPath {
+    if (!_showingSearchHistory || _busy || editingStyle != UITableViewCellEditingStyleDelete ||
+        indexPath.row >= (NSInteger)[_searchHistory count]) {
+        return;
+    }
+    [_searchHistory removeObjectAtIndex:indexPath.row];
+    [self persistSearchHistory];
+    [tableView reloadData];
+    [self updateSearchHistoryStatus];
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -1104,6 +1267,11 @@ static id Fetch(NSString *path, NSError **error) {
         disclosure.textColor = ThemeAccent();
         disclosure.highlightedTextColor = [UIColor whiteColor];
         cell.accessoryView = disclosure;
+    }
+    if (_showingSearchHistory) {
+        cell.textLabel.text = [_searchHistory objectAtIndex:indexPath.row];
+        cell.detailTextLabel.text = @"Повторить поиск";
+        return cell;
     }
     NSDictionary *item = [_items objectAtIndex:indexPath.row];
     cell.textLabel.text = _screen == 0 ? Name(item) : [NSString stringWithFormat:@"Том %@, глава %@ — %@",
@@ -1130,6 +1298,11 @@ static id Fetch(NSString *path, NSError **error) {
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
     if (_busy) {
+        return;
+    }
+    if (_showingSearchHistory) {
+        _query.text = [_searchHistory objectAtIndex:indexPath.row];
+        [self search];
         return;
     }
     NSDictionary *item = [_items objectAtIndex:indexPath.row];
@@ -1803,6 +1976,7 @@ static id Fetch(NSString *path, NSError **error) {
     [_chapters release];
     [_chapter release];
     [_readingProgress release];
+    [_searchHistory release];
     [_query release];
     [_status release];
     [_table release];

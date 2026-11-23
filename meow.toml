@@ -11,7 +11,7 @@ cflags = ["-Wall", "-Wextra", "-Wno-unused-parameter"]
 [package]
 id = "ru.mangapad.apitest"
 name = "MangaLib6"
-version = "0.4.1"
+version = "0.4.2"
 description = "Native MangaLib API prototype for iOS 5.1"
 maintainer = "MangaLib6"
 section = "Applications"

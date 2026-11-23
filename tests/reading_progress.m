@@ -11,6 +11,7 @@
 }
 - (void)runChecks;
 - (void)checkPersistedProgress;
+- (void)runSearchHistoryChecks;
 @end
 
 @implementation ProgressTestController
@@ -21,6 +22,7 @@
 }
 - (void)prefetchPages {}
 - (void)loadCover {}
+- (void)refreshImageServers {}
 - (void)checkPersistedProgress {
     _readingProgress = [[NSMutableDictionary alloc] initWithDictionary:
         [[NSUserDefaults standardUserDefaults] dictionaryForKey:@"MangaLib6ReadingProgress"]];
@@ -31,9 +33,24 @@
     assert([[first objectForKey:@"page_index"] integerValue] == 0);
     assert([[second objectForKey:@"page_index"] integerValue] == 0);
     assert([[self resumeSlug] isEqual:@"another-manga"]);
+    [self loadView];
+    assert(_showingSearchHistory && !_busy && !_lastTask);
+    assert([_query.text isEqual:@""]);
+    assert([_searchHistory count] == 2);
+    assert([[_searchHistory objectAtIndex:0] isEqual:@"Наруто"]);
+    assert([[_searchHistory objectAtIndex:1] isEqual:@"Bleach"]);
     puts("PASS: reading progress survives a separate application launch");
+    puts("PASS: search history survives relaunch without an automatic search");
 }
 - (void)runChecks {
+    [[NSUserDefaults standardUserDefaults] removeObjectForKey:SearchHistoryKey];
+    ProgressTestController *startup = [[ProgressTestController alloc] init];
+    [startup loadView];
+    assert(startup->_showingSearchHistory && !startup->_busy && !startup->_lastTask);
+    assert([startup->_query.text isEqual:@""]);
+    assert(![startup->_searchHistory count]);
+    assert([startup->_status.text rangeOfString:@"пока пуста"].location != NSNotFound);
+    [startup release];
     self.view = [[[UIView alloc] initWithFrame:CGRectMake(0, 0, 768, 1024)] autorelease];
     _contentView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 768, 808)];
     _readingProgress = [[NSMutableDictionary alloc] init];
@@ -176,6 +193,73 @@
     puts("PASS: persisted progress, resume, failed loads, changed chapter size, multiple manga, next chapter");
     puts("PASS: forward/back animation direction, uncached page slide, low-memory fallback");
     puts("PASS: continue from search with unavailable metadata");
+    [self runSearchHistoryChecks];
+}
+
+- (void)runSearchHistoryChecks {
+    _screen = 0;
+    [[NSUserDefaults standardUserDefaults] setObject:[NSArray arrayWithObjects:
+        @" Chainsaw ", [NSNumber numberWithInt:7], @"chainsaw", @" \n ", @"Наруто", [NSDictionary dictionary], nil]
+        forKey:SearchHistoryKey];
+    [self loadSearchHistory];
+    assert([_searchHistory count] == 2);
+    assert([[_searchHistory objectAtIndex:0] isEqual:@"Chainsaw"]);
+    assert([[_searchHistory objectAtIndex:1] isEqual:@"Наруто"]);
+    [self rememberSearchQuery:@" \n "];
+    assert([_searchHistory count] == 2);
+    [self rememberSearchQuery:@" CHAINSAW "];
+    assert([_searchHistory count] == 2);
+    assert([[_searchHistory objectAtIndex:0] isEqual:@"CHAINSAW"]);
+    for (NSUInteger index = 0; index < SearchHistoryLimit + 3; index++) {
+        [self rememberSearchQuery:[NSString stringWithFormat:@"Manga %lu", (unsigned long)index]];
+    }
+    assert([_searchHistory count] == SearchHistoryLimit);
+    assert([[_searchHistory lastObject] isEqual:@"Manga 3"]);
+    [self showSearchHistory];
+    [self clearSearchHistory];
+    assert(![_searchHistory count]);
+    assert(![[[NSUserDefaults standardUserDefaults] arrayForKey:SearchHistoryKey] count]);
+    assert([self savedProgressForSlug:@"test-manga"] && [self savedProgressForSlug:@"another-manga"]);
+
+    _query.text = @"  Наруто  ";
+    [self search];
+    assert(_busy && !_showingSearchHistory && _screen == 0);
+    assert([_query.text isEqual:@"Наруто"]);
+    assert([[_lastTask objectForKey:@"kind"] isEqual:@"catalog"]);
+    assert([[_lastTask objectForKey:@"path"] rangeOfString:Escape(@"Наруто")].location != NSNotFound);
+    assert([[_searchHistory objectAtIndex:0] isEqual:@"Наруто"]);
+    [self finish:[NSDictionary dictionaryWithObjectsAndKeys:@"catalog", @"kind", @"Network error", @"error", nil]];
+    assert([_searchHistory count] == 1);
+    [self showSearchHistory];
+    [self rememberSearchQuery:@"Bleach"];
+    NSIndexPath *indexPath = [NSIndexPath indexPathForRow:1 inSection:0];
+    assert([self tableView:_table numberOfRowsInSection:0] == 2);
+    assert([[[self tableView:_table cellForRowAtIndexPath:indexPath] textLabel].text isEqual:@"Наруто"]);
+    [self tableView:_table didSelectRowAtIndexPath:indexPath];
+    assert(_busy && !_showingSearchHistory);
+    assert([_query.text isEqual:@"Наруто"]);
+    assert([_searchHistory count] == 2 && [[_searchHistory objectAtIndex:0] isEqual:@"Наруто"]);
+    NSDictionary *manga = [NSDictionary dictionaryWithObjectsAndKeys:@"test-manga", @"slug_url", @"Test Manga", @"name", nil];
+    [self finish:[NSDictionary dictionaryWithObjectsAndKeys:@"catalog", @"kind", [NSArray arrayWithObject:manga], @"value", nil]];
+    assert(!_showingSearchHistory && [self tableView:_table numberOfRowsInSection:0] == 1);
+    assert(![self tableView:_table canEditRowAtIndexPath:[NSIndexPath indexPathForRow:0 inSection:0]]);
+    assert([[[self tableView:_table cellForRowAtIndexPath:[NSIndexPath indexPathForRow:0 inSection:0]] textLabel].text isEqual:@"Test Manga"]);
+
+    _query.text = @" \n ";
+    [_lastTask release];
+    _lastTask = nil;
+    [self search];
+    assert(_showingSearchHistory && !_busy && !_lastTask);
+    assert([_catalog count] == 1);
+    assert(!_resumePanel.hidden && _table.tableHeaderView == _resumePanel);
+    [self rememberSearchQuery:@"One Piece"];
+    [self tableView:_table commitEditingStyle:UITableViewCellEditingStyleDelete
+        forRowAtIndexPath:[NSIndexPath indexPathForRow:0 inSection:0]];
+    assert([_searchHistory count] == 2 && ![_searchHistory containsObject:@"One Piece"]);
+    [self loadSearchHistory];
+    assert([_searchHistory count] == 2);
+    assert([[_searchHistory objectAtIndex:0] isEqual:@"Наруто"]);
+    puts("PASS: empty startup, query history, Unicode search, deduplication, limit, failed search, row replay, deletion, clearing");
 }
 - (void)dealloc {
     [_lastTask release];
