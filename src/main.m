@@ -206,6 +206,7 @@ static id Fetch(NSString *path, NSError **error) {
     NSDictionary *_mangaInfo;
     NSArray *_catalog;
     NSArray *_chapters;
+    NSDictionary *_chapter;
     BOOL _titleLoaded;
     UIScrollView *_pageView;
     UIImageView *_image;
@@ -345,6 +346,7 @@ static id Fetch(NSString *path, NSError **error) {
     [pageSwipe release];
     _previous = [self button:@"< Страница" action:@selector(previousPage) frame:CGRectMake(12, height - 48, 140, 36)];
     _next = [self button:@"Страница >" action:@selector(nextPage) frame:CGRectMake(width - 152, height - 48, 140, 36)];
+    _next.titleLabel.adjustsFontSizeToFitWidth = YES;
     NSString *path = [[NSBundle mainBundle] pathForResource:@"snapshot" ofType:@"plist"];
     id snapshot = path ? [NSDictionary dictionaryWithContentsOfFile:path] : nil;
     if ([snapshot isKindOfClass:[NSDictionary class]]) {
@@ -487,7 +489,11 @@ static id Fetch(NSString *path, NSError **error) {
         return;
     }
     BOOL forward = distance.x < 0;
-    if ((forward && _pageIndex + 1 >= (NSInteger)[_pages count]) || (!forward && _pageIndex == 0)) {
+    if (forward && _pageIndex + 1 >= (NSInteger)[_pages count]) {
+        [self nextPage];
+        return;
+    }
+    if (!forward && _pageIndex == 0) {
         return;
     }
     NSLog(@"MangaLib6 swipe %@ page %ld -> %ld (scale=%.2f)", forward ? @"left" : @"right",
@@ -521,6 +527,8 @@ static id Fetch(NSString *path, NSError **error) {
     NSArray *replacement = [items copy];
     [_items release];
     _items = replacement;
+    [_chapter release];
+    _chapter = nil;
     _screen = screen;
     if (screen == 0) {
         [_catalog release];
@@ -699,6 +707,9 @@ static id Fetch(NSString *path, NSError **error) {
 
 - (void)start:(NSDictionary *)task {
     _busy = YES;
+    if (_screen == 2) {
+        [self updatePageControls];
+    }
     _status.text = @"Запрос к MangaLib…";
     [NSThread detachNewThreadSelector:@selector(work:) toTarget:self withObject:task];
 }
@@ -813,8 +824,7 @@ static id Fetch(NSString *path, NSError **error) {
     _pageView.hidden = NO;
     _previous.hidden = NO;
     _next.hidden = NO;
-    _previous.enabled = _pageIndex > 0;
-    _next.enabled = _pageIndex + 1 < (NSInteger)[_pages count];
+    [self updatePageControls];
     NSString *pagePath = [[_pages objectAtIndex:_pageIndex] objectForKey:@"url"];
     if (_live) {
         _lowMemory = NO;
@@ -840,6 +850,23 @@ static id Fetch(NSString *path, NSError **error) {
             (long)_pageIndex + 1, (unsigned long)[_pages count], [_snapshot objectForKey:@"total_pages"]] : @"Картинка не найдена";
         NSLog(@"MangaLib6 snapshot page %ld: %@ decoded=%@", (long)_pageIndex + 1, filename, _image.image ? @"YES" : @"NO");
     }
+}
+
+- (NSDictionary *)nextChapter {
+    if (!_live || _screen != 2 || !_chapter) {
+        return nil;
+    }
+    NSUInteger index = [_items indexOfObject:_chapter];
+    return index != NSNotFound && index + 1 < [_items count] ? [_items objectAtIndex:index + 1] : nil;
+}
+
+- (void)updatePageControls {
+    BOOL lastPage = _pageIndex + 1 >= (NSInteger)[_pages count];
+    NSDictionary *chapter = lastPage ? [self nextChapter] : nil;
+    [_next setTitle:(lastPage ? (chapter ? @"Следующая глава >" : @"Конец манги") : @"Страница >")
+        forState:UIControlStateNormal];
+    _previous.enabled = !_busy && _pageIndex > 0;
+    _next.enabled = !_busy && (!lastPage || chapter != nil);
 }
 
 - (void)previousPage {
@@ -989,10 +1016,18 @@ static id Fetch(NSString *path, NSError **error) {
 }
 
 - (void)nextPage {
-    if (!_busy && _pageIndex + 1 < (NSInteger)[_pages count]) {
+    if (_busy || _screen != 2 || ![_pages count]) {
+        return;
+    }
+    if (_pageIndex + 1 < (NSInteger)[_pages count]) {
         _pageDirection = 1;
         _pageIndex++;
         [self showPage];
+    } else {
+        NSDictionary *chapter = [self nextChapter];
+        if (chapter) {
+            [self start:[NSDictionary dictionaryWithObjectsAndKeys:@"chapter", @"kind", chapter, @"chapter", _slug, @"slug", nil]];
+        }
     }
 }
 
@@ -1300,6 +1335,9 @@ static id Fetch(NSString *path, NSError **error) {
     }
     _busy = NO;
     if ([result objectForKey:@"error"]) {
+        if (_screen == 2) {
+            [self updatePageControls];
+        }
         _status.text = [result objectForKey:@"error"];
         NSLog(@"MangaLib6 request failed: %@", _status.text);
         _smoke = NO;
@@ -1347,6 +1385,8 @@ static id Fetch(NSString *path, NSError **error) {
         }
     } else if ([kind isEqual:@"chapter"]) {
         [self resetPageBuffer];
+        [_chapter release];
+        _chapter = [[result objectForKey:@"chapter"] copy];
         [_pages release];
         _pages = [value copy];
         NSLog(@"MangaLib6 live chapter: %lu pages", (unsigned long)[_pages count]);
@@ -1364,6 +1404,7 @@ static id Fetch(NSString *path, NSError **error) {
     [_mangaInfo release];
     [_catalog release];
     [_chapters release];
+    [_chapter release];
     [_query release];
     [_status release];
     [_table release];
