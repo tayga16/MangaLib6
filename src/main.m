@@ -1,10 +1,74 @@
 #import <UIKit/UIKit.h>
+#import <QuartzCore/QuartzCore.h>
 #include <math.h>
 
 static const NSInteger PageBufferSize = 5;
 static const NSInteger PageHistorySize = 2;
 static const NSInteger PageRetryLimit = 2;
 static const NSTimeInterval ImageRequestTimeout = 8;
+
+static UIColor *ThemeAccent(void) {
+    return [UIColor colorWithRed:0.9 green:0.43 blue:0.12 alpha:1];
+}
+
+static UIColor *ThemeBackground(void) {
+    return [UIColor colorWithRed:1 green:0.94 blue:0.87 alpha:1];
+}
+
+static UIColor *ThemeSurface(void) {
+    return [UIColor colorWithRed:1 green:0.98 blue:0.94 alpha:1];
+}
+
+static UIColor *ThemeText(void) {
+    return [UIColor colorWithRed:0.3 green:0.15 blue:0.07 alpha:1];
+}
+
+static UIColor *ThemeSecondaryText(void) {
+    return [UIColor colorWithRed:0.52 green:0.28 blue:0.13 alpha:1];
+}
+
+static UIColor *ThemeBorder(void) {
+    return [UIColor colorWithRed:0.88 green:0.68 blue:0.49 alpha:1];
+}
+
+static UIImage *ThemeBackgroundImage(UIColor *top, UIColor *bottom, UIColor *border) {
+    CGRect bounds = CGRectMake(0, 0, 32, 36);
+    UIGraphicsBeginImageContextWithOptions(bounds.size, NO, 0);
+    CGContextRef context = UIGraphicsGetCurrentContext();
+    UIBezierPath *outline = [UIBezierPath bezierPathWithRoundedRect:CGRectInset(bounds, 0.5, 0.5) cornerRadius:6];
+    CGContextSaveGState(context);
+    [outline addClip];
+    CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
+    NSArray *colors = [NSArray arrayWithObjects:(id)top.CGColor, (id)bottom.CGColor, nil];
+    CGGradientRef gradient = CGGradientCreateWithColors(colorSpace, (CFArrayRef)colors, NULL);
+    CGContextDrawLinearGradient(context, gradient, CGPointMake(0, 0), CGPointMake(0, 36), 0);
+    CGGradientRelease(gradient);
+    CGColorSpaceRelease(colorSpace);
+    CGContextRestoreGState(context);
+    [border setStroke];
+    [outline stroke];
+    UIImage *image = UIGraphicsGetImageFromCurrentImageContext();
+    UIGraphicsEndImageContext();
+    return [image stretchableImageWithLeftCapWidth:16 topCapHeight:18];
+}
+
+static void ThemeButton(UIButton *button) {
+    static UIImage *normal = nil;
+    static UIImage *highlighted = nil;
+    if (!normal) {
+        normal = [ThemeBackgroundImage([UIColor colorWithRed:1 green:0.62 blue:0.28 alpha:1],
+            ThemeAccent(), [UIColor colorWithRed:0.72 green:0.32 blue:0.08 alpha:1]) retain];
+        highlighted = [ThemeBackgroundImage(ThemeAccent(),
+            [UIColor colorWithRed:0.74 green:0.32 blue:0.08 alpha:1], ThemeSecondaryText()) retain];
+    }
+    [button setBackgroundImage:normal forState:UIControlStateNormal];
+    [button setBackgroundImage:highlighted forState:UIControlStateHighlighted];
+    [button setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    [button setTitleColor:ThemeBackground() forState:UIControlStateDisabled];
+    [button setTitleShadowColor:[UIColor colorWithWhite:0 alpha:0.3] forState:UIControlStateNormal];
+    button.titleLabel.font = [UIFont boldSystemFontOfSize:15];
+    button.titleLabel.shadowOffset = CGSizeMake(0, -1);
+}
 
 static BOOL TransientNetworkError(NSError *error) {
     NSInteger code = [error code];
@@ -51,6 +115,36 @@ static NSString *InfoText(id value) {
         return [parts componentsJoinedByString:@", "];
     }
     return @"";
+}
+
+static NSString *ChapterPublicationDate(NSDictionary *chapter) {
+    NSDictionary *publication = chapter;
+    id branches = [chapter objectForKey:@"branches"];
+    if ([branches isKindOfClass:[NSArray class]] && [branches count] &&
+        [[branches objectAtIndex:0] isKindOfClass:[NSDictionary class]]) {
+        publication = [branches objectAtIndex:0];
+    }
+    NSString *timestamp = InfoText([publication objectForKey:@"created_at"]);
+    if ([timestamp length] < 10) {
+        return @"";
+    }
+    static NSDateFormatter *parser = nil;
+    static NSDateFormatter *formatter = nil;
+    if (!parser) {
+        NSLocale *locale = [[[NSLocale alloc] initWithLocaleIdentifier:@"en_US_POSIX"] autorelease];
+        parser = [[NSDateFormatter alloc] init];
+        parser.locale = locale;
+        parser.timeZone = [NSTimeZone timeZoneForSecondsFromGMT:0];
+        parser.dateFormat = @"yyyy-MM-dd";
+        parser.lenient = NO;
+        formatter = [[NSDateFormatter alloc] init];
+        formatter.locale = locale;
+        formatter.timeZone = parser.timeZone;
+        formatter.dateFormat = @"dd.MM.yyyy";
+    }
+    NSString *day = [timestamp substringToIndex:10];
+    NSDate *date = [parser dateFromString:day];
+    return date && [[parser stringFromDate:date] isEqual:day] ? [formatter stringFromDate:date] : @"";
 }
 
 static NSData *Download(NSString *url, NSError **error) {
@@ -132,6 +226,7 @@ static id Fetch(NSString *path, NSError **error) {
     NSString *_slug;
     NSInteger _screen;
     NSInteger _pageIndex;
+    NSInteger _pageDirection;
     NSUInteger _readerGeneration;
     BOOL _live;
     BOOL _busy;
@@ -142,7 +237,8 @@ static id Fetch(NSString *path, NSError **error) {
 
 @implementation MangaLib6Controller
 - (UIButton *)button:(NSString *)title action:(SEL)action frame:(CGRect)frame {
-    UIButton *button = [UIButton buttonWithType:UIButtonTypeRoundedRect];
+    UIButton *button = [UIButton buttonWithType:UIButtonTypeCustom];
+    ThemeButton(button);
     button.frame = frame;
     [button setTitle:title forState:UIControlStateNormal];
     [button addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
@@ -162,43 +258,75 @@ static id Fetch(NSString *path, NSError **error) {
         _preferredImageServer = [preferredServer copy];
     }
     self.view = [[[UIView alloc] initWithFrame:[[UIScreen mainScreen] bounds]] autorelease];
-    self.view.backgroundColor = [UIColor whiteColor];
+    self.view.backgroundColor = ThemeBackground();
     CGFloat width = self.view.bounds.size.width;
     CGFloat height = self.view.bounds.size.height;
-    _query = [[UITextField alloc] initWithFrame:CGRectMake(12, 12, width - 124, 36)];
-    _query.borderStyle = UITextBorderStyleRoundedRect;
+    CGFloat headerHeight = 44;
+    CGFloat contentTop = headerHeight + 172;
+    UINavigationBar *header = [[[UINavigationBar alloc] initWithFrame:CGRectMake(0, 0, width, headerHeight)] autorelease];
+    header.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    header.tintColor = ThemeAccent();
+    UINavigationItem *headerItem = [[[UINavigationItem alloc] initWithTitle:@"MangaLib6"] autorelease];
+    UIView *brand = [[[UIView alloc] initWithFrame:CGRectMake(0, 0, 186, 32)] autorelease];
+    UIImageView *brandIcon = [[[UIImageView alloc] initWithImage:[UIImage imageNamed:@"Icon-Small.png"]] autorelease];
+    brandIcon.frame = CGRectMake(0, 0, 32, 32);
+    brandIcon.contentMode = UIViewContentModeScaleAspectFit;
+    [brand addSubview:brandIcon];
+    UILabel *brandTitle = [[[UILabel alloc] initWithFrame:CGRectMake(40, 0, 146, 32)] autorelease];
+    brandTitle.text = @"MangaLib6";
+    brandTitle.font = [UIFont boldSystemFontOfSize:21];
+    brandTitle.backgroundColor = [UIColor clearColor];
+    brandTitle.textColor = [UIColor whiteColor];
+    brandTitle.shadowColor = [UIColor colorWithWhite:0 alpha:0.4];
+    brandTitle.shadowOffset = CGSizeMake(0, -1);
+    [brand addSubview:brandTitle];
+    headerItem.titleView = brand;
+    [header setItems:[NSArray arrayWithObject:headerItem] animated:NO];
+    [self.view addSubview:header];
+    _query = [[UITextField alloc] initWithFrame:CGRectMake(12, headerHeight + 12, width - 124, 36)];
+    _query.borderStyle = UITextBorderStyleNone;
+    _query.background = ThemeBackgroundImage(ThemeSurface(), ThemeBackground(), ThemeBorder());
+    _query.textColor = ThemeText();
+    _query.contentVerticalAlignment = UIControlContentVerticalAlignmentCenter;
+    _query.leftView = [[[UIView alloc] initWithFrame:CGRectMake(0, 0, 10, 36)] autorelease];
+    _query.leftViewMode = UITextFieldViewModeAlways;
     _query.text = @"chainsaw";
     _query.placeholder = @"Поиск манги";
     _query.delegate = self;
     _query.returnKeyType = UIReturnKeySearch;
     [self.view addSubview:_query];
-    [self button:@"Поиск" action:@selector(search) frame:CGRectMake(width - 104, 12, 92, 36)];
-    [self button:@"Назад" action:@selector(goBack) frame:CGRectMake(12, 56, 80, 36)];
-    _status = [[UILabel alloc] initWithFrame:CGRectMake(12, 100, width - 24, 64)];
+    [self button:@"Поиск" action:@selector(search) frame:CGRectMake(width - 104, headerHeight + 12, 92, 36)];
+    [self button:@"Назад" action:@selector(goBack) frame:CGRectMake(12, headerHeight + 56, 80, 36)];
+    _status = [[UILabel alloc] initWithFrame:CGRectMake(12, headerHeight + 100, width - 24, 64)];
     _status.numberOfLines = 3;
     _status.font = [UIFont systemFontOfSize:15];
+    _status.backgroundColor = [UIColor clearColor];
+    _status.textColor = ThemeSecondaryText();
     [self.view addSubview:_status];
-    _table = [[UITableView alloc] initWithFrame:CGRectMake(0, 172, width, height - 172) style:UITableViewStylePlain];
+    _table = [[UITableView alloc] initWithFrame:CGRectMake(0, contentTop, width, height - contentTop) style:UITableViewStylePlain];
     _table.dataSource = self;
     _table.delegate = self;
+    _table.backgroundColor = ThemeSurface();
+    _table.separatorColor = ThemeBorder();
     [self.view addSubview:_table];
     _infoView = [[UIScrollView alloc] initWithFrame:_table.frame];
-    _infoView.backgroundColor = [UIColor colorWithWhite:0.96 alpha:1];
+    _infoView.backgroundColor = ThemeBackground();
     _infoView.hidden = YES;
     [self.view addSubview:_infoView];
     _cover = [[UIImageView alloc] initWithFrame:CGRectMake((width - 160) / 2, 12, 160, 224)];
     _cover.contentMode = UIViewContentModeScaleAspectFit;
-    _cover.backgroundColor = [UIColor colorWithWhite:0.9 alpha:1];
+    _cover.backgroundColor = ThemeSurface();
     [_infoView addSubview:_cover];
     _coverStatus = [[UILabel alloc] initWithFrame:_cover.frame];
     _coverStatus.backgroundColor = [UIColor clearColor];
+    _coverStatus.textColor = ThemeSecondaryText();
     _coverStatus.textAlignment = UITextAlignmentCenter;
     _coverStatus.font = [UIFont systemFontOfSize:14];
     _coverStatus.numberOfLines = 0;
     [_infoView addSubview:_coverStatus];
-    _pageView = [[UIScrollView alloc] initWithFrame:CGRectMake(0, 172, width, height - 232)];
+    _pageView = [[UIScrollView alloc] initWithFrame:CGRectMake(0, contentTop, width, height - contentTop - 60)];
     _pageView.delegate = self;
-    _pageView.backgroundColor = [UIColor blackColor];
+    _pageView.backgroundColor = [UIColor colorWithRed:0.15 green:0.08 blue:0.04 alpha:1];
     _pageView.minimumZoomScale = 1;
     _pageView.maximumZoomScale = 4;
     _pageView.hidden = YES;
@@ -247,7 +375,21 @@ static id Fetch(NSString *path, NSError **error) {
         MAX(viewport.height, content.height) / 2);
 }
 
+- (void)animateAppearance:(UIView *)view {
+    if (_smoke || !view.window || view.hidden) {
+        return;
+    }
+    CATransition *transition = [CATransition animation];
+    transition.type = kCATransitionFade;
+    transition.duration = 0.18;
+    transition.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+    [view.layer addAnimation:transition forKey:@"appearance"];
+}
+
 - (void)setPageImage:(UIImage *)image {
+    if (!image) {
+        [_pageView.layer removeAnimationForKey:@"pageTransition"];
+    }
     [_pageView setZoomScale:1 animated:NO];
     _image.image = image;
     CGSize viewport = _pageView.bounds.size;
@@ -262,6 +404,23 @@ static id Fetch(NSString *path, NSError **error) {
     _pageView.maximumZoomScale = image ? 4 : 1;
     _pageView.scrollEnabled = image != nil;
     [self centerPage];
+}
+
+- (void)transitionToPageImage:(UIImage *)image {
+    BOOL slide = _pageDirection != 0 && _image.image != nil;
+    BOOL animate = image && image != _image.image && !_smoke && !_lowMemory && _pageView.window;
+    [self setPageImage:image];
+    if (animate) {
+        CATransition *transition = [CATransition animation];
+        transition.type = slide ? kCATransitionPush : kCATransitionFade;
+        if (slide) {
+            transition.subtype = _pageDirection > 0 ? kCATransitionFromRight : kCATransitionFromLeft;
+        }
+        transition.duration = slide ? 0.22 : 0.18;
+        transition.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+        [_pageView.layer addAnimation:transition forKey:@"pageTransition"];
+    }
+    _pageDirection = 0;
 }
 
 - (UIView *)viewForZoomingInScrollView:(UIScrollView *)scrollView {
@@ -380,6 +539,7 @@ static id Fetch(NSString *path, NSError **error) {
     _previous.hidden = YES;
     _next.hidden = YES;
     [_table reloadData];
+    [self animateAppearance:_table];
 }
 
 - (CGFloat)infoLabel:(NSString *)text font:(UIFont *)font top:(CGFloat)top left:(CGFloat)left width:(CGFloat)width {
@@ -387,6 +547,7 @@ static id Fetch(NSString *path, NSError **error) {
         lineBreakMode:UILineBreakModeWordWrap].height);
     UILabel *label = [[[UILabel alloc] initWithFrame:CGRectMake(left, top, width, MAX(height, font.lineHeight))] autorelease];
     label.backgroundColor = [UIColor clearColor];
+    label.textColor = ThemeText();
     label.font = font;
     label.numberOfLines = 0;
     label.text = text;
@@ -410,7 +571,8 @@ static id Fetch(NSString *path, NSError **error) {
     CGFloat width = _infoView.bounds.size.width;
     CGFloat top = 252;
     top += [self infoLabel:Name(_mangaInfo) font:[UIFont boldSystemFontOfSize:20] top:top left:20 width:width - 40] + 12;
-    UIButton *chapters = [UIButton buttonWithType:UIButtonTypeRoundedRect];
+    UIButton *chapters = [UIButton buttonWithType:UIButtonTypeCustom];
+    ThemeButton(chapters);
     chapters.frame = CGRectMake(20, top, width - 40, 40);
     [chapters setTitle:@"Открыть главы" forState:UIControlStateNormal];
     [chapters addTarget:self action:@selector(openChapters) forControlEvents:UIControlEventTouchUpInside];
@@ -460,6 +622,7 @@ static id Fetch(NSString *path, NSError **error) {
     _infoView.contentSize = CGSizeMake(width, top + 8);
     _status.text = _titleLoaded || !_live ? @"Информация о манге" : @"Загружаем информацию о манге…";
     [self loadCover];
+    [self animateAppearance:_infoView];
 }
 
 - (void)openManga:(NSDictionary *)item {
@@ -585,12 +748,33 @@ static id Fetch(NSString *path, NSError **error) {
     UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"item"];
     if (!cell) {
         cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:@"item"] autorelease];
+        cell.backgroundView = [[[UIView alloc] initWithFrame:CGRectZero] autorelease];
+        cell.backgroundView.backgroundColor = ThemeSurface();
+        cell.selectedBackgroundView = [[[UIView alloc] initWithFrame:CGRectZero] autorelease];
+        cell.selectedBackgroundView.backgroundColor = ThemeAccent();
+        cell.textLabel.backgroundColor = [UIColor clearColor];
+        cell.textLabel.textColor = ThemeText();
+        cell.textLabel.highlightedTextColor = [UIColor whiteColor];
+        cell.detailTextLabel.backgroundColor = [UIColor clearColor];
+        cell.detailTextLabel.textColor = ThemeSecondaryText();
+        cell.detailTextLabel.highlightedTextColor = ThemeBackground();
+        UILabel *disclosure = [[[UILabel alloc] initWithFrame:CGRectMake(0, 0, 18, 30)] autorelease];
+        disclosure.text = @"›";
+        disclosure.font = [UIFont boldSystemFontOfSize:28];
+        disclosure.backgroundColor = [UIColor clearColor];
+        disclosure.textColor = ThemeAccent();
+        disclosure.highlightedTextColor = [UIColor whiteColor];
+        cell.accessoryView = disclosure;
     }
     NSDictionary *item = [_items objectAtIndex:indexPath.row];
     cell.textLabel.text = _screen == 0 ? Name(item) : [NSString stringWithFormat:@"Том %@, глава %@ — %@",
         [item objectForKey:@"volume"], [item objectForKey:@"number"], Name(item)];
-    cell.detailTextLabel.text = _screen == 0 ? [item objectForKey:@"slug_url"] : @"Первая доступная публичная ветка перевода";
-    cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    if (_screen == 0) {
+        cell.detailTextLabel.text = [item objectForKey:@"slug_url"];
+    } else {
+        NSString *date = ChapterPublicationDate(item);
+        cell.detailTextLabel.text = [date length] ? [NSString stringWithFormat:@"Опубликована: %@", date] : @"Дата публикации не указана";
+    }
     return cell;
 }
 
@@ -627,7 +811,6 @@ static id Fetch(NSString *path, NSError **error) {
     _infoView.hidden = YES;
     _table.hidden = YES;
     _pageView.hidden = NO;
-    [self setPageImage:nil];
     _previous.hidden = NO;
     _next.hidden = NO;
     _previous.enabled = _pageIndex > 0;
@@ -642,6 +825,7 @@ static id Fetch(NSString *path, NSError **error) {
         if (image) {
             [self displayPageImage:image cacheHit:YES];
         } else {
+            [self setPageImage:nil];
             if (_imageTask && [[_imageTask objectForKey:@"page_index"] integerValue] != _pageIndex) {
                 [self cancelImageDownload];
             }
@@ -651,7 +835,7 @@ static id Fetch(NSString *path, NSError **error) {
     } else {
         NSString *filename = [[_snapshot objectForKey:@"image_files"] objectForKey:pagePath];
         NSString *path = filename ? [[[NSBundle mainBundle] bundlePath] stringByAppendingPathComponent:filename] : nil;
-        [self setPageImage:(path ? [UIImage imageWithContentsOfFile:path] : nil)];
+        [self transitionToPageImage:(path ? [UIImage imageWithContentsOfFile:path] : nil)];
         _status.text = _image.image ? [NSString stringWithFormat:@"Снимок: страница %ld/%lu (в главе %@)",
             (long)_pageIndex + 1, (unsigned long)[_pages count], [_snapshot objectForKey:@"total_pages"]] : @"Картинка не найдена";
         NSLog(@"MangaLib6 snapshot page %ld: %@ decoded=%@", (long)_pageIndex + 1, filename, _image.image ? @"YES" : @"NO");
@@ -660,6 +844,7 @@ static id Fetch(NSString *path, NSError **error) {
 
 - (void)previousPage {
     if (!_busy && _pageIndex > 0) {
+        _pageDirection = -1;
         _pageIndex--;
         [self showPage];
     }
@@ -667,6 +852,7 @@ static id Fetch(NSString *path, NSError **error) {
 
 - (void)resetPageBuffer {
     _readerGeneration++;
+    _pageDirection = 0;
     [self cancelImageDownload];
     _lowMemory = NO;
     [_pageCache removeAllObjects];
@@ -717,7 +903,7 @@ static id Fetch(NSString *path, NSError **error) {
 }
 
 - (void)displayPageImage:(UIImage *)image cacheHit:(BOOL)cacheHit {
-    [self setPageImage:image];
+    [self transitionToPageImage:image];
     [self updatePageStatus];
     NSLog(@"MangaLib6 live page %ld: decoded=%@ cacheHit=%@", (long)_pageIndex + 1,
         _image.image ? @"YES" : @"NO", cacheHit ? @"YES" : @"NO");
@@ -783,6 +969,10 @@ static id Fetch(NSString *path, NSError **error) {
 
 - (void)didReceiveMemoryWarning {
     [super didReceiveMemoryWarning];
+    [_pageView.layer removeAnimationForKey:@"pageTransition"];
+    [_table.layer removeAnimationForKey:@"appearance"];
+    [_infoView.layer removeAnimationForKey:@"appearance"];
+    [_cover.layer removeAnimationForKey:@"appearance"];
     if (_screen != 3) {
         [self cancelCoverDownload];
         _cover.image = nil;
@@ -800,6 +990,7 @@ static id Fetch(NSString *path, NSError **error) {
 
 - (void)nextPage {
     if (!_busy && _pageIndex + 1 < (NSInteger)[_pages count]) {
+        _pageDirection = 1;
         _pageIndex++;
         [self showPage];
     }
@@ -963,6 +1154,9 @@ static id Fetch(NSString *path, NSError **error) {
         _coverStatus.hidden = _cover.image != nil;
         _coverStatus.text = @"Обложка\nне поддерживается";
         [self cancelCoverDownload];
+        if (_cover.image && !_infoView.hidden) {
+            [self animateAppearance:_cover];
+        }
         return;
     }
     if (connection != _imageConnection) {
