@@ -10,6 +10,30 @@ static const NSUInteger SearchHistoryLimit = 20;
 static NSString *const SearchHistoryKey = @"MangaLib6SearchHistory";
 static const NSTimeInterval ImageRequestTimeout = 8;
 
+// Decode at the original resolution on a worker, before handing an image to UIKit.
+static UIImage *DecodePageImage(NSData *data) {
+    UIImage *source = [UIImage imageWithData:data];
+    CGImageRef original = source.CGImage;
+    if (!original) return nil;
+    size_t width = CGImageGetWidth(original), height = CGImageGetHeight(original);
+    CGColorSpaceRef space = CGColorSpaceCreateDeviceRGB();
+    CGContextRef context = CGBitmapContextCreate(NULL, width, height, 8, width * 4, space,
+        kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
+    CGColorSpaceRelease(space);
+    if (!context) return source;
+    CGContextDrawImage(context, CGRectMake(0, 0, width, height), original);
+    CGImageRef decoded = CGBitmapContextCreateImage(context);
+    UIImage *image = decoded ? [UIImage imageWithCGImage:decoded scale:source.scale orientation:source.imageOrientation] : source;
+    if (decoded) CGImageRelease(decoded);
+    CGContextRelease(context);
+    return image;
+}
+
+static unsigned long long PageImageBytes(UIImage *image) {
+    CGImageRef original = image.CGImage;
+    return original ? (unsigned long long)CGImageGetWidth(original) * CGImageGetHeight(original) * 4 : 0;
+}
+
 static UIColor *ThemeAccent(void) {
     return [UIColor colorWithRed:0.9 green:0.43 blue:0.12 alpha:1];
 }
@@ -264,6 +288,9 @@ static id Fetch(NSString *path, NSError **error) {
     NSString *_preferredImageServer;
     NSUInteger _imageServerIndex;
     BOOL _imageRetryable;
+    NSUInteger _imageDecodeGeneration;
+    NSUInteger _imageDecodeCount;
+    unsigned long long _pageImageEstimate;
     BOOL _serversLoading;
     NSString *_slug;
     NSInteger _screen;
@@ -297,6 +324,9 @@ static id Fetch(NSString *path, NSError **error) {
 - (void)setReaderFullscreen:(BOOL)enabled;
 - (void)updateDownloadControls;
 - (void)updateReaderInfo;
+- (void)decodePage:(NSDictionary *)task;
+- (void)finishDecodedPage:(NSDictionary *)result;
+- (void)startOfflinePageDecode;
 @end
 
 @implementation MangaLib6Controller
@@ -552,9 +582,8 @@ static id Fetch(NSString *path, NSError **error) {
 }
 
 - (void)setPageImage:(UIImage *)image {
-    if (!image) {
-        [_pageView.layer removeAnimationForKey:@"pageTransition"];
-    }
+    [_image.layer removeAnimationForKey:@"pageTransition"];
+    [_pageView.layer removeAnimationForKey:@"pageTransition"];
     [_pageView setZoomScale:1 animated:NO];
     _image.image = image;
     CGSize viewport = _pageView.bounds.size;
@@ -572,20 +601,21 @@ static id Fetch(NSString *path, NSError **error) {
 }
 
 - (void)transitionToPageImage:(UIImage *)image {
-    BOOL slide = _pageDirection != 0 && _image.image != nil;
-    BOOL animate = (slide || image) && image != _image.image && !_smoke && !_lowMemory && _pageView.window;
+    BOOL slide = _pageDirection != 0;
+    BOOL animate = image && image != _image.image && !_smoke && !_lowMemory && _pageView.window;
     [self setPageImage:image];
     if (animate) {
-        CATransition *transition = [CATransition animation];
-        transition.type = slide ? kCATransitionPush : kCATransitionFade;
-        if (slide) {
-            transition.subtype = _pageDirection > 0 ? kCATransitionFromRight : kCATransitionFromLeft;
-        }
+        // Animate only the image: a transition on the scroll view snapshots the
+        // entire zoomable reader, which is expensive on emulated iPhone 4 iOS.
+        CABasicAnimation *transition = [CABasicAnimation animationWithKeyPath:slide ? @"position.x" : @"opacity"];
+        CGFloat position = _image.layer.position.x;
+        transition.fromValue = [NSNumber numberWithFloat:slide ? position + (_pageDirection > 0 ? 1 : -1) * _pageView.bounds.size.width : 0];
+        transition.toValue = [NSNumber numberWithFloat:slide ? position : 1];
         transition.duration = slide ? 0.3 : 0.18;
         transition.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
-        [_pageView.layer addAnimation:transition forKey:@"pageTransition"];
+        [_image.layer addAnimation:transition forKey:@"pageTransition"];
     }
-    _pageDirection = 0;
+    if (image) _pageDirection = 0;
 }
 
 - (UIView *)viewForZoomingInScrollView:(UIScrollView *)scrollView {
@@ -1650,18 +1680,14 @@ static id Fetch(NSString *path, NSError **error) {
     [self updatePageControls];
     NSString *pagePath = [[_pages objectAtIndex:_pageIndex] objectForKey:@"url"];
     if (_offlineChapter) {
-        NSData *data = [_downloads page:_pageIndex entry:_offlineChapter];
-        UIImage *image = data ? [UIImage imageWithData:data] : nil;
-        [self transitionToPageImage:image];
-        [self saveReadingProgress];
-        _status.text = image ? [NSString stringWithFormat:@"Без интернета: страница %ld/%lu. Осталось: %ld",
-            (long)_pageIndex + 1, (unsigned long)[_pages count], (long)[_pages count] - _pageIndex - 1] :
-            @"Сохранённая страница повреждена. Удали загрузку и скачай главу заново.";
+        [self cancelImageDownload];
+        [self transitionToPageImage:nil];
+        _status.text = @"Открываем сохранённую страницу…";
         [self updateReaderInfo];
+        if (!_imageDecodeCount) [self startOfflinePageDecode];
         return;
     }
     if (_live) {
-        _lowMemory = NO;
         [self trimPageBuffer];
         NSNumber *page = [NSNumber numberWithInteger:_pageIndex];
         [_pageErrors removeObjectForKey:page];
@@ -1719,8 +1745,8 @@ static id Fetch(NSString *path, NSError **error) {
     _readerGeneration++;
     _pageDirection = 0;
     [self cancelImageDownload];
-    _lowMemory = NO;
     [_pageCache removeAllObjects];
+    _pageImageEstimate = 0;
     [_pageErrors removeAllObjects];
     [self setPageImage:nil];
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(nextPage) object:nil];
@@ -1742,6 +1768,24 @@ static id Fetch(NSString *path, NSError **error) {
                 [entries removeObjectForKey:page];
             }
         }
+    }
+    // Seven full-resolution scans can exceed the iPhone 4's available app memory.
+    unsigned long long budget = (UI_USER_INTERFACE_IDIOM() == UIUserInterfaceIdiomPhone ? 24ULL : 48ULL) * 1024 * 1024;
+    unsigned long long bytes = 0;
+    for (UIImage *image in [_pageCache allValues]) bytes += PageImageBytes(image);
+    while (bytes > budget && [_pageCache count] > 1) {
+        NSNumber *victim = nil;
+        NSInteger distance = -1;
+        for (NSNumber *page in _pageCache) {
+            NSInteger index = [page integerValue];
+            if (index == _pageIndex) continue;
+            // Keep the nearest unread pages before history pages.
+            NSInteger priority = index < _pageIndex ? PageBufferSize + _pageIndex - index : index - _pageIndex;
+            if (priority > distance) { victim = page; distance = priority; }
+        }
+        if (!victim) break;
+        bytes -= PageImageBytes([_pageCache objectForKey:victim]);
+        [_pageCache removeObjectForKey:victim];
     }
 }
 
@@ -1786,7 +1830,7 @@ static id Fetch(NSString *path, NSError **error) {
 
 - (void)prefetchPages {
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(prefetchPages) object:nil];
-    if (_offlineChapter || _downloading || !_live || _screen != 2 || _busy || _imageTask) {
+    if (_offlineChapter || _downloading || !_live || _screen != 2 || _busy || _imageTask || _imageDecodeCount) {
         return;
     }
     if (![_imageServers count]) {
@@ -1803,6 +1847,15 @@ static id Fetch(NSString *path, NSError **error) {
         NSNumber *page = [NSNumber numberWithInteger:index];
         if ([_pageCache objectForKey:page]) {
             continue;
+        }
+        if (index != _pageIndex && [_pageCache count]) {
+            unsigned long long bytes = 0, largest = _pageImageEstimate;
+            for (UIImage *image in [_pageCache allValues]) {
+                unsigned long long size = PageImageBytes(image);
+                bytes += size; largest = MAX(largest, size);
+            }
+            unsigned long long budget = (UI_USER_INTERFACE_IDIOM() == UIUserInterfaceIdiomPhone ? 24ULL : 48ULL) * 1024 * 1024;
+            if (bytes + largest > budget) return;
         }
         NSDictionary *failure = [_pageErrors objectForKey:page];
         if (failure) {
@@ -1840,6 +1893,7 @@ static id Fetch(NSString *path, NSError **error) {
     _resumeCover.image = nil;
     [_contentView.layer removeAnimationForKey:@"navigation"];
     [_pageView.layer removeAnimationForKey:@"pageTransition"];
+    [_image.layer removeAnimationForKey:@"pageTransition"];
     [_table.layer removeAnimationForKey:@"appearance"];
     [_infoView.layer removeAnimationForKey:@"appearance"];
     [_cover.layer removeAnimationForKey:@"appearance"];
@@ -1885,6 +1939,7 @@ static id Fetch(NSString *path, NSError **error) {
 }
 
 - (void)cancelImageDownload {
+    _imageDecodeGeneration++;
     [_imageConnection cancel];
     [_imageConnection release];
     _imageConnection = nil;
@@ -2082,7 +2137,50 @@ static id Fetch(NSString *path, NSError **error) {
     if (connection != _imageConnection) {
         return;
     }
-    UIImage *image = [UIImage imageWithData:_imageData];
+    NSDictionary *task = [NSDictionary dictionaryWithObjectsAndKeys:
+        [[_imageData copy] autorelease], @"data", [NSNumber numberWithUnsignedInteger:_imageDecodeGeneration], @"decode_generation", nil];
+    _imageDecodeCount++;
+    [NSThread detachNewThreadSelector:@selector(decodePage:) toTarget:self withObject:task];
+}
+
+- (void)decodePage:(NSDictionary *)task {
+    NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+    NSData *data = [task objectForKey:@"data"];
+    if ([task objectForKey:@"offline"]) data = [_downloads page:[[task objectForKey:@"page_index"] integerValue]
+        entry:[task objectForKey:@"offline"]];
+    UIImage *image = DecodePageImage(data);
+    NSMutableDictionary *result = [NSMutableDictionary dictionaryWithDictionary:task];
+    [result removeObjectForKey:@"data"];
+    if (image) [result setObject:image forKey:@"value"];
+    [self performSelectorOnMainThread:@selector(finishDecodedPage:) withObject:result waitUntilDone:NO];
+    [pool drain];
+}
+
+- (void)finishDecodedPage:(NSDictionary *)result {
+    if (_imageDecodeCount) _imageDecodeCount--;
+    if ([result objectForKey:@"offline"]) {
+        if ([[result objectForKey:@"decode_generation"] unsignedIntegerValue] == _imageDecodeGeneration &&
+            _offlineChapter && _screen == 2 && [[result objectForKey:@"page_index"] integerValue] == _pageIndex) {
+            UIImage *image = [result objectForKey:@"value"];
+            [self transitionToPageImage:image];
+            [self saveReadingProgress];
+            _status.text = image ? [NSString stringWithFormat:@"Без интернета: страница %ld/%lu. Осталось: %ld",
+                (long)_pageIndex + 1, (unsigned long)[_pages count], (long)[_pages count] - _pageIndex - 1] :
+                @"Сохранённая страница повреждена. Удали загрузку и скачай главу заново.";
+            [self updateReaderInfo];
+        } else if (_offlineChapter && _screen == 2 && !_imageDecodeCount) {
+            [self startOfflinePageDecode];
+        } else {
+            [self prefetchPages];
+        }
+        return;
+    }
+    if ([[result objectForKey:@"decode_generation"] unsignedIntegerValue] != _imageDecodeGeneration || !_imageTask) {
+        if (_offlineChapter && _screen == 2 && !_imageDecodeCount) { [self startOfflinePageDecode]; return; }
+        [self prefetchPages];
+        return;
+    }
+    UIImage *image = [result objectForKey:@"value"];
     if (!image) {
         [self imageDownloadFailed:nil allowFallback:YES];
         return;
@@ -2097,6 +2195,14 @@ static id Fetch(NSString *path, NSError **error) {
         [[NSUserDefaults standardUserDefaults] setObject:base forKey:@"MangaLib6PreferredImageServer"];
     }
     [self completeImageDownload:image error:nil];
+}
+
+- (void)startOfflinePageDecode {
+    NSDictionary *task = [NSDictionary dictionaryWithObjectsAndKeys:
+        _offlineChapter, @"offline", [NSNumber numberWithInteger:_pageIndex], @"page_index",
+        [NSNumber numberWithUnsignedInteger:_imageDecodeGeneration], @"decode_generation", nil];
+    _imageDecodeCount++;
+    [NSThread detachNewThreadSelector:@selector(decodePage:) toTarget:self withObject:task];
 }
 
 - (void)work:(NSDictionary *)task {
@@ -2206,7 +2312,9 @@ static id Fetch(NSString *path, NSError **error) {
         UIImage *image = [result objectForKey:@"value"];
         if (image) {
             [_pageErrors removeObjectForKey:page];
+            _pageImageEstimate = MAX(_pageImageEstimate, PageImageBytes(image));
             [_pageCache setObject:image forKey:page];
+            [self trimPageBuffer];
             NSLog(@"MangaLib6 buffer stored page %ld: %lu/%ld", (long)index + 1,
                 (unsigned long)[_pageCache count], (long)([self bufferEnd] - [self bufferStart]));
             NSLog(@"MangaLib6 page %ld download time: %.2f seconds", (long)index + 1,

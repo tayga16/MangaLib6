@@ -1,9 +1,16 @@
 // Included by reading_progress.m: disk persistence and the real offline reader.
 @interface DownloadTestController : MangaLib6Controller
 - (void)runDownloadChecks:(BOOL)verify;
+- (void)waitForOfflinePage;
 @end
 @implementation DownloadTestController
 - (void)refreshImageServers {}
+- (void)waitForOfflinePage {
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:15];
+    while (_imageDecodeCount && [deadline timeIntervalSinceNow] > 0)
+        [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
+    assert(!_imageDecodeCount);
+}
 - (void)loadResumeCoverForSlug:(NSString *)slug progress:(NSDictionary *)progress {}
 - (void)work:(NSDictionary *)task { assert(!"Offline reader attempted a network request"); }
 - (void)startImageDownload:(NSDictionary *)task {
@@ -94,6 +101,7 @@
     [self showDownloads];
     assert(_screen == 4 && [_items count] == 2);
     [self openDownloaded:[_downloads entry:key] page:1];
+    [self waitForOfflinePage];
     assert(_screen == 2 && _offlineChapter && _downloadsReader && _image.image && _pageIndex == 1);
     assert(_readerFullscreen == (UI_USER_INTERFACE_IDIOM() == UIUserInterfaceIdiomPhone));
     [self setReaderFullscreen:YES];
@@ -107,12 +115,34 @@
     assert([_status.text rangeOfString:@"Без интернета"].location != NSNotFound);
     assert([self nextChapter] && [[self nextChapter] isEqual:second]);
     [self nextPage];
+    [self waitForOfflinePage];
     assert(_offlineChapter && _pageIndex == 0 && [_chapter isEqual:second] && _image.image);
     assert(_readerFullscreen && CGRectEqualToRect(_pageView.frame, self.view.bounds));
     [self goBack];
     assert(_screen == 4 && !_offlineChapter && !_readerFullscreen && _readerInfo.hidden);
     [self continueReading];
+    [self waitForOfflinePage];
     assert(_screen == 2 && _offlineChapter && [_chapter isEqual:second]);
+    if (!verify) {
+        // Fast turns must finish on the latest page, with just one worker active.
+        [self showPage];
+        assert(_imageDecodeCount == 1 && !_image.image);
+        [self nextPage];
+        [self previousPage];
+        assert(_imageDecodeCount == 1 && _pageIndex == 0);
+        [self waitForOfflinePage];
+        assert(_image.image && _pageIndex == 0);
+        assert([[[self savedProgressForSlug:@"offline-test"] objectForKey:@"page_index"] integerValue] == 0);
+        // Leaving during decoding cannot restore an image on the downloads screen.
+        [self showPage];
+        [self goBack];
+        [self waitForOfflinePage];
+        assert(_screen == 4 && !_offlineChapter && !_image.image);
+        [self continueReading];
+        [self waitForOfflinePage];
+        assert(_screen == 2 && _offlineChapter && _image.image && _pageIndex == 0);
+        puts("PASS: offline background decoding, rapid turns, cancellation on exit, saved latest position");
+    }
     puts("PASS: fullscreen layout, controls toggle, download button, zoom, fullscreen next chapter and return");
     puts(verify ? "PASS: downloaded chapters survive relaunch and read offline" :
         "PASS: partial downloads, controller resume/cancel, corruption repair, offline reader, next chapter, saved position");

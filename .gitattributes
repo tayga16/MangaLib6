@@ -1,0 +1,2 @@
+packaging/postinst text eol=lf
+packaging/postrm text eol=lf

@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 #import "chapter_downloads.h"
+#import "reader_responsiveness.h"
 
 @interface ProgressTestController : MangaLib6Controller {
     NSDictionary *_lastTask;
@@ -181,9 +182,17 @@
     _image.image = [UIImage imageNamed:@"Icon.png"];
     _pageDirection = 1;
     [self transitionToPageImage:nil];
-    transition = (CATransition *)[_pageView.layer animationForKey:@"pageTransition"];
-    assert([transition.type isEqual:kCATransitionPush]);
-    assert([transition.subtype isEqual:kCATransitionFromRight]);
+    assert(![_pageView.layer animationForKey:@"pageTransition"]);
+    assert(_pageDirection == 1);
+    [self transitionToPageImage:[UIImage imageNamed:@"Icon.png"]];
+    CABasicAnimation *pageAnimation = (CABasicAnimation *)[_image.layer animationForKey:@"pageTransition"];
+    assert([pageAnimation.keyPath isEqual:@"position.x"]);
+    assert([pageAnimation.fromValue floatValue] > [pageAnimation.toValue floatValue]);
+    [self transitionToPageImage:nil];
+    _pageDirection = -1;
+    [self transitionToPageImage:[UIImage imageNamed:@"Icon.png"]];
+    pageAnimation = (CABasicAnimation *)[_image.layer animationForKey:@"pageTransition"];
+    assert([pageAnimation.fromValue floatValue] < [pageAnimation.toValue floatValue]);
     [_contentView.layer removeAnimationForKey:@"navigation"];
     _lowMemory = YES;
     [self animateNavigationToScreen:1];
@@ -192,7 +201,7 @@
     window.rootViewController = nil;
     [window release];
     puts("PASS: persisted progress, resume, failed loads, changed chapter size, multiple manga, next chapter");
-    puts("PASS: forward/back animation direction, uncached page slide, low-memory fallback");
+    puts("PASS: forward/back image slide, uncached page direction, low-memory fallback");
     puts("PASS: continue from search with unavailable metadata");
     [self runSearchHistoryChecks];
 }
@@ -280,6 +289,11 @@ int main(int argc, char **argv) {
     DownloadTestController *downloads = [[DownloadTestController alloc] init];
     [downloads runDownloadChecks:argc > 1 && strcmp(argv[1], "verify") == 0];
     [downloads release];
+    if (!(argc > 1 && strcmp(argv[1], "verify") == 0)) {
+        ReaderResponsivenessController *reader = [[ReaderResponsivenessController alloc] init];
+        [reader runReaderChecks];
+        [reader release];
+    }
     [[NSUserDefaults standardUserDefaults] setObject:original forKey:@"MangaLib6ReadingProgress"];
     [[NSUserDefaults standardUserDefaults] synchronize];
     [original release];

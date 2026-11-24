@@ -34,7 +34,7 @@
 
 Готовые IPA и APK: [Releases](https://github.com/tayga16/MangaLib6/releases).
 
-- iPhone/iPad: [MangaLib6 0.5.0](https://github.com/tayga16/MangaLib6/releases/tag/ios-v0.5.0).
+- iPhone/iPad: [MangaLib6 0.5.1](https://github.com/tayga16/MangaLib6/releases/tag/ios-v0.5.1).
 - Android 2.3+: [OldLib 0.1.0 — тестовый релиз](https://github.com/tayga16/MangaLib6/releases/tag/oldlib-v0.1.0).
 
 ## Управление
@@ -70,7 +70,9 @@
 «Продолжить читать» возвращает в сохранённую главу без обращения к API.
 На iOS свайп влево удаляет загрузку, на Android есть кнопка «Удалить».
 Файлы хранятся в данных приложения; удаление приложения удалит и главы.
-Текущая сборка с загрузками: MangaLib6 0.5.0 (сборка 15) и OldLib 0.1.0 (сборка 16).
+Текущая сборка с загрузками: MangaLib6 0.5.1 (сборка 16) и OldLib 0.1.0 (сборка 16).
+На iOS страницы подготавливаются в фоновом потоке в исходном разрешении.
+Буфер изображений ограничен 24 МиБ на iPhone и 48 МиБ на iPad; текущая страница сохраняется.
 На Android страницы загружаются с предпочтением исходного качества,
 а разрешение ограничивается памятью, а не экраном. На Android 2.3.3+
 при зуме видимый участок декодируется отдельно для сохранения чёткости текста.
@@ -103,11 +105,26 @@ meow build MangaLib6-ipa
 
 Результат сборки: IPA в каталоге `build/`.
 
+### Cydia-репозиторий
+
+Для устройств с jailbreak доступны DEB и архив статического репозитория в релизе 0.5.1.
+Сборка пакета и подготовка каталога для `http://tayga16.ru/repo/`:
+
+```sh
+meow build MangaLib6-deb
+python tools/cydia_repo.py --deb build/ru.mangapad.apitest_0.5.1_iphoneos-arm.deb --ipa build/MangaLib6_0.5.1.ipa
+```
+
+Файлы появятся в `build/cydia/repo/`. Размещение на Linux-сервере описано
+в [packaging/README.md](packaging/README.md). Адрес источника станет доступен после размещения файлов на сервере.
+
 ### GitHub Actions
 
 Workflow **Build IPA** собирает приложение при push в `main`, в pull request
-и вручную: **Actions → Build IPA → Run workflow**.
+и вручную: **Actions → Build IPA → Run workflow**. Он также собирает DEB,
+проверяет пакеты и формирует архив Cydia-репозитория.
 После успешной сборки скачай артефакт `MangaLib6-ipa` на странице запуска
 и распакуй ZIP, чтобы получить IPA.
+Артефакт `MangaLib6-cydia` содержит DEB и архив для размещения на сервере.
 
 Для установки на устройство потребуется подходящая подпись или среда установки.

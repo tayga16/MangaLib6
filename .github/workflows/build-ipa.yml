@@ -46,13 +46,28 @@ jobs:
           meow setup toolchain
           meow setup sdks --sdk 6.1
 
-      - name: Build ARMv7 IPA
-        run: meow build MangaLib6-ipa
+      - name: Build ARMv7 IPA and DEB
+        run: meow build MangaLib6-ipa MangaLib6-deb
+
+      - name: Verify packages and prepare Cydia repository
+        run: |
+          python3 tools/check_ipa.py build/MangaLib6_0.5.1.ipa
+          python3 tools/cydia_repo.py --deb build/ru.mangapad.apitest_0.5.1_iphoneos-arm.deb --ipa build/MangaLib6_0.5.1.ipa
 
       - name: Upload IPA
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: MangaLib6-ipa
           path: build/*.ipa
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload DEB and Cydia repository
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: MangaLib6-cydia
+          path: |
+            build/*.deb
+            build/cydia/*.tar.gz
           if-no-files-found: error
           retention-days: 14

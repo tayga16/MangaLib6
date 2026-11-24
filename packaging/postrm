@@ -1,0 +1,14 @@
+#!/bin/sh
+set -e
+case "$1" in
+    remove|purge)
+        if [ -x /usr/bin/uicache ]; then
+            if command -v su >/dev/null 2>&1; then
+                su mobile -c /usr/bin/uicache || /usr/bin/uicache
+            else
+                /usr/bin/uicache
+            fi
+        fi
+        ;;
+esac
+exit 0
