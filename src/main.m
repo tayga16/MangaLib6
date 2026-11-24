@@ -1,6 +1,7 @@
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 #include <math.h>
+#import "ChapterDownloads.h"
 
 static const NSInteger PageBufferSize = 5;
 static const NSInteger PageHistorySize = 2;
@@ -273,7 +274,29 @@ static id Fetch(NSString *path, NSError **error) {
     BOOL _busy;
     BOOL _lowMemory;
     BOOL _smoke;
+    MangaLib6Downloads *_downloads;
+    NSDictionary *_offlineChapter;
+    NSMutableDictionary *_downloadEntry;
+    NSDictionary *_downloadManga;
+    UIButton *_downloadButton;
+    UIButton *_readerDownloadButton;
+    UIButton *_cancelDownloadButton;
+    UILabel *_readerInfo;
+    CGRect _normalContentFrame;
+    BOOL _readerFullscreen;
+    NSUInteger _downloadGeneration;
+    BOOL _downloading;
+    BOOL _downloadPreparing;
+    BOOL _downloadsReader;
 }
+- (void)showDownloads;
+- (void)openDownloaded:(NSDictionary *)entry page:(NSInteger)page;
+- (void)downloadChapter:(NSDictionary *)chapter manga:(NSDictionary *)manga;
+- (void)downloadNextPage;
+- (void)stopChapterDownload;
+- (void)setReaderFullscreen:(BOOL)enabled;
+- (void)updateDownloadControls;
+- (void)updateReaderInfo;
 @end
 
 @implementation MangaLib6Controller
@@ -288,6 +311,10 @@ static id Fetch(NSString *path, NSError **error) {
 }
 
 - (void)loadView {
+    NSString *documents = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) objectAtIndex:0];
+    _downloads = [[MangaLib6Downloads alloc] initWithRoot:[documents stringByAppendingPathComponent:@"Chapters"]];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(pauseChapterDownload:)
+        name:UIApplicationWillResignActiveNotification object:nil];
     _pageCache = [[NSMutableDictionary alloc] init];
     _pageErrors = [[NSMutableDictionary alloc] init];
     id progress = [[NSUserDefaults standardUserDefaults] objectForKey:@"MangaLib6ReadingProgress"];
@@ -345,6 +372,9 @@ static id Fetch(NSString *path, NSError **error) {
     [self button:@"Поиск" action:@selector(search) frame:CGRectMake(width - 104, headerHeight + 12, 92, 36)];
     [self button:@"Назад" action:@selector(goBack) frame:CGRectMake(12, headerHeight + 56, 80, 36)];
     [self button:@"История" action:@selector(showSearchHistory) frame:CGRectMake(104, headerHeight + 56, 100, 36)];
+    _downloadButton = [self button:@"Загрузки" action:@selector(downloadsButton) frame:CGRectMake(width - 104, headerHeight + 56, 92, 36)];
+    _cancelDownloadButton = [self button:@"Отмена" action:@selector(cancelChapterDownload) frame:CGRectMake(width - 104, headerHeight + 112, 92, 36)];
+    _cancelDownloadButton.hidden = YES;
     _status = [[UILabel alloc] initWithFrame:CGRectMake(12, headerHeight + 100, width - 24, 64)];
     _status.numberOfLines = 3;
     _status.font = [UIFont systemFontOfSize:15];
@@ -352,6 +382,7 @@ static id Fetch(NSString *path, NSError **error) {
     _status.textColor = ThemeSecondaryText();
     [self.view addSubview:_status];
     _contentView = [[UIView alloc] initWithFrame:CGRectMake(0, contentTop, width, height - contentTop)];
+    _normalContentFrame = _contentView.frame;
     _contentView.clipsToBounds = YES;
     [self.view addSubview:_contentView];
     _table = [[UITableView alloc] initWithFrame:_contentView.bounds style:UITableViewStylePlain];
@@ -389,6 +420,10 @@ static id Fetch(NSString *path, NSError **error) {
     UITapGestureRecognizer *doubleTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(zoomPage:)];
     doubleTap.numberOfTapsRequired = 2;
     [_pageView addGestureRecognizer:doubleTap];
+    UITapGestureRecognizer *singleTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(toggleReaderFullscreen:)];
+    [singleTap requireGestureRecognizerToFail:doubleTap];
+    [_pageView addGestureRecognizer:singleTap];
+    [singleTap release];
     [doubleTap release];
     UIPanGestureRecognizer *pageSwipe = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(swipePage:)];
     pageSwipe.maximumNumberOfTouches = 1;
@@ -398,6 +433,16 @@ static id Fetch(NSString *path, NSError **error) {
     _previous = [self button:@"< Страница" action:@selector(previousPage) frame:CGRectMake(12, height - 48, 140, 36)];
     _next = [self button:@"Страница >" action:@selector(nextPage) frame:CGRectMake(width - 152, height - 48, 140, 36)];
     _next.titleLabel.adjustsFontSizeToFitWidth = YES;
+    _readerDownloadButton = [self button:@"Скачать главу" action:@selector(downloadCurrentChapter) frame:CGRectMake(12, height - 92, width - 24, 36)];
+    _readerDownloadButton.hidden = YES;
+    _readerInfo = [[UILabel alloc] initWithFrame:CGRectMake(0, height - 42, width, 42)];
+    _readerInfo.backgroundColor = [UIColor colorWithWhite:0 alpha:0.7];
+    _readerInfo.textColor = [UIColor whiteColor];
+    _readerInfo.font = [UIFont systemFontOfSize:11];
+    _readerInfo.textAlignment = UITextAlignmentCenter;
+    _readerInfo.numberOfLines = 2;
+    _readerInfo.hidden = YES;
+    [self.view addSubview:_readerInfo];
     NSString *path = [[NSBundle mainBundle] pathForResource:@"snapshot" ofType:@"plist"];
     id snapshot = path ? [NSDictionary dictionaryWithContentsOfFile:path] : nil;
     if ([snapshot isKindOfClass:[NSDictionary class]]) {
@@ -427,6 +472,50 @@ static id Fetch(NSString *path, NSError **error) {
     CGSize content = _pageView.contentSize;
     _image.center = CGPointMake(MAX(viewport.width, content.width) / 2,
         MAX(viewport.height, content.height) / 2);
+}
+
+- (void)setReaderFullscreen:(BOOL)enabled {
+    _readerFullscreen = enabled && _screen == 2;
+    if (CGRectIsEmpty(_normalContentFrame)) _normalContentFrame = _contentView.frame;
+    for (UIView *view in [self.view subviews]) {
+        if (view != _contentView && view != _previous && view != _next &&
+            view != _readerDownloadButton && view != _readerInfo && view != _cancelDownloadButton) {
+            view.hidden = _readerFullscreen;
+        }
+    }
+    _contentView.frame = _readerFullscreen ? self.view.bounds : _normalContentFrame;
+    _table.frame = _contentView.bounds;
+    _infoView.frame = _contentView.bounds;
+    CGRect pageFrame = _contentView.bounds;
+    if (!_readerFullscreen) pageFrame.size.height = MAX((CGFloat)0, pageFrame.size.height - 104);
+    BOOL resizeImage = !CGRectEqualToRect(_pageView.frame, pageFrame);
+    _pageView.frame = pageFrame;
+    _previous.hidden = _next.hidden = _screen != 2 || _readerFullscreen;
+    _readerDownloadButton.hidden = _screen != 2 || _readerFullscreen;
+    _readerInfo.hidden = !_readerFullscreen;
+    _readerInfo.frame = CGRectMake(0, self.view.bounds.size.height - 42, self.view.bounds.size.width, 42);
+    [self updateDownloadControls];
+    [self updateReaderInfo];
+    if (resizeImage && _image.image) [self setPageImage:_image.image];
+}
+
+- (void)toggleReaderFullscreen:(UITapGestureRecognizer *)gesture {
+    if (_screen == 2) [self setReaderFullscreen:!_readerFullscreen];
+}
+
+- (void)updateReaderInfo {
+    if (_screen != 2) return;
+    NSInteger forward = 0, history = 0;
+    for (NSNumber *page in _pageCache) {
+        if ([page integerValue] >= _pageIndex) forward++; else history++;
+    }
+    NSDictionary *error = [_pageErrors objectForKey:[NSNumber numberWithInteger:_pageIndex]];
+    NSString *details = _downloading ? _status.text : _offlineChapter ? (_image.image ? @"Без интернета" : _status.text) : error ?
+        [error objectForKey:@"message"] :
+        [NSString stringWithFormat:@"Буфер: %ld/%ld · Назад: %ld%@", (long)forward,
+            (long)([self bufferEnd] - _pageIndex), (long)history, _image.image ? @"" : @" · Загрузка…"];
+    _readerInfo.text = [NSString stringWithFormat:@"Страница %ld/%lu · Осталось: %ld\n%@",
+        (long)_pageIndex + 1, (unsigned long)[_pages count], MAX((long)0, (long)[_pages count] - _pageIndex - 1), details];
 }
 
 - (void)animateAppearance:(UIView *)view {
@@ -596,6 +685,7 @@ static id Fetch(NSString *path, NSError **error) {
 }
 
 - (void)setItems:(NSArray *)items screen:(NSInteger)screen {
+    [self stopChapterDownload];
     [self animateNavigationToScreen:screen];
     [self resetPageBuffer];
     [self cancelCoverDownload];
@@ -605,7 +695,10 @@ static id Fetch(NSString *path, NSError **error) {
     [_chapter release];
     _chapter = nil;
     _screen = screen;
+    [self setReaderFullscreen:NO];
     _showingSearchHistory = NO;
+    [_offlineChapter release]; _offlineChapter = nil;
+    _downloadsReader = NO;
     if (screen == 0) {
         [_catalog release];
         _catalog = [_items copy];
@@ -645,6 +738,7 @@ static id Fetch(NSString *path, NSError **error) {
     _table.tableHeaderView = nil;
     [self resetPageBuffer];
     _screen = 3;
+    [self setReaderFullscreen:NO];
     _table.hidden = YES;
     _pageView.hidden = YES;
     _previous.hidden = YES;
@@ -725,6 +819,7 @@ static id Fetch(NSString *path, NSError **error) {
 }
 
 - (void)openManga:(NSDictionary *)item {
+    [_offlineChapter release]; _offlineChapter = nil; _downloadsReader = NO;
     [_slug release];
     _slug = [[item objectForKey:@"slug_url"] copy];
     [self cancelCoverDownload];
@@ -958,6 +1053,8 @@ static id Fetch(NSString *path, NSError **error) {
     if (!progress) {
         return;
     }
+    NSDictionary *local = [_downloads entry:ChapterKey(slug, progress)];
+    if ([_downloads complete:local]) { [self openDownloaded:local page:[[progress objectForKey:@"page_index"] integerValue]]; return; }
     _resumeRequested = YES;
     if (_screen == 0) {
         [self openManga:[NSDictionary dictionaryWithObjectsAndKeys:slug, @"slug_url",
@@ -1041,6 +1138,18 @@ static id Fetch(NSString *path, NSError **error) {
 }
 
 - (void)start:(NSDictionary *)task {
+    if ([[task objectForKey:@"kind"] isEqual:@"chapter"]) {
+        NSDictionary *local = [_downloads entry:ChapterKey([task objectForKey:@"slug"], [task objectForKey:@"chapter"])];
+        if ([_downloads complete:local]) {
+            [self stopChapterDownload];
+            [_offlineChapter release]; _offlineChapter = [local copy];
+            [self finish:[NSDictionary dictionaryWithObjectsAndKeys:@"chapter", @"kind", [task objectForKey:@"chapter"], @"chapter",
+                [local objectForKey:@"pages"], @"value", [task objectForKey:@"resume_page"] ?: [NSNumber numberWithInt:0], @"resume_page", nil]];
+            return;
+        }
+        [_offlineChapter release]; _offlineChapter = nil;
+    }
+    [self stopChapterDownload];
     _busy = YES;
     [self updateResumeButton];
     if (_screen == 2) {
@@ -1145,12 +1254,167 @@ static id Fetch(NSString *path, NSError **error) {
     if (_busy) {
         return;
     }
+    [self stopChapterDownload];
     [self flushReadingProgress];
     [self setItems:_catalog screen:0];
     _showingSearchHistory = YES;
     [_table reloadData];
     [_table setContentOffset:CGPointZero animated:NO];
     [self updateSearchHistoryStatus];
+}
+
+- (void)stopChapterDownload {
+    _downloading = NO;
+    _downloadPreparing = NO;
+    _downloadGeneration++;
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(downloadNextPage) object:nil];
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(chapterDownloadTimedOut) object:nil];
+    if ([[_imageTask objectForKey:@"kind"] isEqual:@"download-image"]) [self cancelImageDownload];
+    [_downloadEntry release]; _downloadEntry = nil;
+    [_downloadManga release]; _downloadManga = nil;
+    [self updateDownloadControls];
+}
+
+- (void)updateDownloadControls {
+    _cancelDownloadButton.hidden = !_downloading || _readerFullscreen || _screen == 2;
+    CGRect statusFrame = _status.frame;
+    statusFrame.size.width = self.view.bounds.size.width - (_downloading && _screen != 2 ? 124 : 24);
+    _status.frame = statusFrame;
+    BOOL saved = _offlineChapter != nil;
+    if (_screen == 2 && !saved && !_downloading)
+        saved = [_downloads complete:[_downloads entry:ChapterKey(_slug, _chapter)]];
+    [_readerDownloadButton setTitle:(_downloading ? @"Отмена скачивания" : saved ? @"Глава скачана" : @"Скачать главу") forState:UIControlStateNormal];
+    _readerDownloadButton.enabled = !_busy && (_downloading || (_live && _chapter && !saved));
+}
+
+- (void)cancelChapterDownload {
+    [self stopChapterDownload];
+    _status.text = @"Скачивание приостановлено. Продолжить можно в «Загрузках».";
+    [self updateReaderInfo];
+}
+
+- (void)downloadCurrentChapter {
+    if (_screen != 2) return;
+    if (_downloading) [self cancelChapterDownload];
+    else [self downloadChapter:_chapter manga:_mangaInfo];
+}
+
+- (void)pauseChapterDownload:(NSNotification *)notification {
+    BOOL wasDownloading = _downloading;
+    [self stopChapterDownload];
+    [self flushReadingProgress];
+    if (wasDownloading) _status.text = @"Скачивание приостановлено. Продолжить можно в «Загрузках».";
+}
+
+- (void)chapterDownloadTimedOut {
+    if (!_downloading) return;
+    [self stopChapterDownload];
+    _status.text = @"Сервер не ответил за 30 секунд. Продолжи скачивание в «Загрузках».";
+}
+
+- (void)downloadsButton {
+    if (_downloading) {
+        [self stopChapterDownload];
+        [self showDownloads];
+        _status.text = @"Скачивание приостановлено. Сохранённые страницы останутся в «Загрузках».";
+    } else [self showDownloads];
+}
+
+- (void)showDownloads {
+    if (_busy) return;
+    [self stopChapterDownload];
+    [self flushReadingProgress];
+    [_query resignFirstResponder];
+    [self setItems:[_downloads entries] screen:4];
+    _table.tableHeaderView = nil;
+    _resumePanel.hidden = YES;
+    [self cancelResumeCoverDownload];
+    [_table setContentOffset:CGPointZero animated:NO];
+    _status.text = [_items count] ? @"Скачанные главы доступны без интернета. Нажми незавершённую для продолжения. Свайп влево — удалить." :
+        @"Загрузок пока нет. Открой список глав и нажми «Скачать».";
+}
+
+- (void)openDownloaded:(NSDictionary *)entry page:(NSInteger)page {
+    if (_busy || ![_downloads complete:entry]) return;
+    // The selected dictionary can belong to _items, which setItems releases.
+    NSDictionary *local = [entry copy];
+    [self stopChapterDownload];
+    [self flushReadingProgress];
+    [self cancelCoverDownload];
+    [self cancelResumeCoverDownload];
+    [_slug release]; _slug = [[[local objectForKey:@"manga"] objectForKey:@"slug_url"] copy];
+    [_mangaInfo release]; _mangaInfo = [[local objectForKey:@"manga"] copy];
+    NSMutableArray *chapters = [NSMutableArray array];
+    for (NSDictionary *item in [_downloads entries])
+        if ([[[item objectForKey:@"manga"] objectForKey:@"slug_url"] isEqual:_slug] && [_downloads complete:item])
+            [chapters addObject:[item objectForKey:@"chapter"]];
+    [chapters sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+        NSComparisonResult volume = [[NSDecimalNumber decimalNumberWithString:InfoText([a objectForKey:@"volume"])]
+            compare:[NSDecimalNumber decimalNumberWithString:InfoText([b objectForKey:@"volume"])]];
+        return volume == NSOrderedSame ? [[NSDecimalNumber decimalNumberWithString:InfoText([a objectForKey:@"number"])]
+            compare:[NSDecimalNumber decimalNumberWithString:InfoText([b objectForKey:@"number"])]] : volume;
+    }];
+    [self setItems:chapters screen:1];
+    _downloadsReader = YES;
+    [_offlineChapter release]; _offlineChapter = [local copy];
+    [self finish:[NSDictionary dictionaryWithObjectsAndKeys:@"chapter", @"kind", [local objectForKey:@"chapter"], @"chapter",
+        [local objectForKey:@"pages"], @"value", [NSNumber numberWithInteger:page], @"resume_page", nil]];
+    [local release];
+}
+
+- (void)downloadChapterButton:(UIButton *)button {
+    if (_screen != 1 || button.tag < 0 || button.tag >= (NSInteger)[_items count]) return;
+    [self downloadChapter:[_items objectAtIndex:button.tag] manga:_mangaInfo];
+}
+
+- (void)downloadChapter:(NSDictionary *)chapter manga:(NSDictionary *)manga {
+    if (_busy || _downloading || !_live || ![InfoText([manga objectForKey:@"slug_url"]) length]) return;
+    [self cancelImageDownload];
+    [self cancelCoverDownload];
+    [self cancelResumeCoverDownload];
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(prefetchPages) object:nil];
+    _downloading = YES;
+    _downloadGeneration++;
+    _downloadManga = [manga copy];
+    [self updateDownloadControls];
+    _status.text = @"Получаем главу для скачивания…";
+    [self performSelector:@selector(chapterDownloadTimedOut) withObject:nil afterDelay:30];
+    NSMutableDictionary *existing = [_downloads entry:ChapterKey([manga objectForKey:@"slug_url"], chapter)];
+    NSArray *knownPages = _screen == 2 && [chapter isEqual:_chapter] ? _pages : [existing objectForKey:@"pages"];
+    if ([knownPages count]) {
+        _downloadEntry = [[_downloads prepare:manga chapter:chapter pages:knownPages] retain];
+        if (_downloadEntry) { [self downloadNextPage]; return; }
+        [self stopChapterDownload]; _status.text = @"Не удалось сохранить загрузку. Проверь свободное место."; return;
+    }
+    _downloadPreparing = YES;
+    [NSThread detachNewThreadSelector:@selector(work:) toTarget:self withObject:
+        [NSDictionary dictionaryWithObjectsAndKeys:@"download-chapter", @"kind", chapter, @"chapter", [manga objectForKey:@"slug_url"], @"slug",
+        [NSNumber numberWithUnsignedInteger:_downloadGeneration], @"download_generation", nil]];
+}
+
+- (void)downloadNextPage {
+    if (!_downloading || _downloadPreparing || !_downloadEntry || _imageTask) return;
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(chapterDownloadTimedOut) object:nil];
+    [self performSelector:@selector(chapterDownloadTimedOut) withObject:nil afterDelay:30];
+    NSArray *pages = [_downloadEntry objectForKey:@"pages"];
+    NSInteger index = 0;
+    while (index < (NSInteger)[pages count] && [_downloads hasPage:index entry:_downloadEntry]) index++;
+    if (index == (NSInteger)[pages count]) {
+        BOOL saved = [_downloads finish:_downloadEntry];
+        [self stopChapterDownload];
+        if (_screen == 4) [self showDownloads]; else [_table reloadData];
+        _status.text = saved ? @"Глава скачана. Можно читать без интернета в «Загрузках»." :
+            @"Не удалось завершить загрузку. Продолжи скачивание в «Загрузках».";
+        [self updateReaderInfo];
+        return;
+    }
+    _status.text = [NSString stringWithFormat:@"Скачивание: %lu / %lu стр. Кнопка «Отмена» приостанавливает загрузку.",
+        (unsigned long)[_downloads count:_downloadEntry], (unsigned long)[pages count]];
+    [self updateReaderInfo];
+    if (![_imageServers count]) { [self refreshImageServers]; return; }
+    [self startImageDownload:[NSDictionary dictionaryWithObjectsAndKeys:@"download-image", @"kind",
+        [[pages objectAtIndex:index] objectForKey:@"url"], @"image_path", [NSNumber numberWithInteger:index], @"page_index",
+        _imageServers, @"servers", [NSNumber numberWithUnsignedInteger:_downloadGeneration], @"download_generation", nil]];
 }
 
 - (void)clearSearchHistory {
@@ -1177,6 +1441,8 @@ static id Fetch(NSString *path, NSError **error) {
 - (void)goBack {
     if (!_busy) {
         [self flushReadingProgress];
+        if (_downloadsReader) { [self showDownloads]; return; }
+        if (_screen == 4) { [self showSearchHistory]; return; }
         if (_screen == 2) {
             [self setItems:_items screen:1];
             _status.text = @"Выбери главу";
@@ -1227,7 +1493,7 @@ static id Fetch(NSString *path, NSError **error) {
 }
 
 - (BOOL)tableView:(UITableView *)tableView canEditRowAtIndexPath:(NSIndexPath *)indexPath {
-    return _showingSearchHistory && !_busy;
+    return (_showingSearchHistory || _screen == 4) && !_busy;
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForDeleteConfirmationButtonForRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -1236,6 +1502,13 @@ static id Fetch(NSString *path, NSError **error) {
 
 - (void)tableView:(UITableView *)tableView commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
     forRowAtIndexPath:(NSIndexPath *)indexPath {
+    if (_screen == 4 && !_busy && editingStyle == UITableViewCellEditingStyleDelete && indexPath.row < (NSInteger)[_items count]) {
+        [self stopChapterDownload];
+        if (![_downloads remove:[[_items objectAtIndex:indexPath.row] objectForKey:@"id"]]) {
+            _status.text = @"Не удалось удалить загрузку"; return;
+        }
+        [self showDownloads]; return;
+    }
     if (!_showingSearchHistory || _busy || editingStyle != UITableViewCellEditingStyleDelete ||
         indexPath.row >= (NSInteger)[_searchHistory count]) {
         return;
@@ -1268,12 +1541,24 @@ static id Fetch(NSString *path, NSError **error) {
         disclosure.highlightedTextColor = [UIColor whiteColor];
         cell.accessoryView = disclosure;
     }
+    UILabel *arrow = [[[UILabel alloc] initWithFrame:CGRectMake(0, 0, 18, 30)] autorelease];
+    arrow.text = @"›"; arrow.textColor = ThemeAccent(); arrow.font = [UIFont boldSystemFontOfSize:28];
+    arrow.backgroundColor = [UIColor clearColor]; cell.accessoryView = arrow;
     if (_showingSearchHistory) {
         cell.textLabel.text = [_searchHistory objectAtIndex:indexPath.row];
         cell.detailTextLabel.text = @"Повторить поиск";
         return cell;
     }
     NSDictionary *item = [_items objectAtIndex:indexPath.row];
+    if (_screen == 4) {
+        NSDictionary *chapter = [item objectForKey:@"chapter"];
+        cell.textLabel.text = [NSString stringWithFormat:@"%@ · Глава %@", Name([item objectForKey:@"manga"]),
+            [chapter objectForKey:@"number"]];
+        cell.detailTextLabel.text = [NSString stringWithFormat:@"%@ · %lu/%lu страниц · Свайп: удалить",
+            [_downloads complete:item] ? @"Без интернета" : @"Нажми, чтобы продолжить скачивание",
+            (unsigned long)[_downloads count:item], (unsigned long)[[item objectForKey:@"pages"] count]];
+        return cell;
+    }
     cell.textLabel.text = _screen == 0 ? Name(item) : [NSString stringWithFormat:@"Том %@, глава %@ — %@",
         [item objectForKey:@"volume"], [item objectForKey:@"number"], Name(item)];
     if (_screen == 0) {
@@ -1282,6 +1567,13 @@ static id Fetch(NSString *path, NSError **error) {
             [progress objectForKey:@"number"], (long)[[progress objectForKey:@"page_index"] integerValue] + 1,
             (long)[[progress objectForKey:@"page_count"] integerValue]] : [item objectForKey:@"slug_url"];
     } else {
+        NSDictionary *local = [_downloads entry:ChapterKey(_slug, item)];
+        UIButton *download = [UIButton buttonWithType:UIButtonTypeCustom]; ThemeButton(download);
+        download.frame = CGRectMake(0, 0, 78, 34); download.tag = indexPath.row; download.titleLabel.font = [UIFont boldSystemFontOfSize:12];
+        [download setTitle:([_downloads complete:local] ? @"Скачана" : @"Скачать") forState:UIControlStateNormal];
+        download.enabled = ![_downloads complete:local] && !_busy && !_downloading;
+        [download addTarget:self action:@selector(downloadChapterButton:) forControlEvents:UIControlEventTouchUpInside];
+        cell.accessoryView = download;
         NSString *date = ChapterPublicationDate(item);
         NSDictionary *progress = [self savedProgressForSlug:_slug];
         BOOL savedChapter = [InfoText([item objectForKey:@"volume"]) isEqual:[progress objectForKey:@"volume"]] &&
@@ -1306,6 +1598,16 @@ static id Fetch(NSString *path, NSError **error) {
         return;
     }
     NSDictionary *item = [_items objectAtIndex:indexPath.row];
+    if (_screen == 4) {
+        if ([_downloads complete:item]) {
+            NSDictionary *progress = [self savedProgressForSlug:[[item objectForKey:@"manga"] objectForKey:@"slug_url"]];
+            NSDictionary *chapter = [item objectForKey:@"chapter"];
+            BOOL same = [InfoText([chapter objectForKey:@"volume"]) isEqual:[progress objectForKey:@"volume"]] &&
+                [InfoText([chapter objectForKey:@"number"]) isEqual:[progress objectForKey:@"number"]];
+            [self openDownloaded:item page:same ? [[progress objectForKey:@"page_index"] integerValue] : 0];
+        } else [self downloadChapter:[item objectForKey:@"chapter"] manga:[item objectForKey:@"manga"]];
+        return;
+    }
     if (_screen == 0) {
         if (!_live && ![[item objectForKey:@"slug_url"] isEqual:[[_snapshot objectForKey:@"title"] objectForKey:@"slug_url"]]) {
             _status.text = [NSString stringWithFormat:@"Для этой манги нет снимка. Выбери %@.", Name([_snapshot objectForKey:@"title"])];
@@ -1334,17 +1636,30 @@ static id Fetch(NSString *path, NSError **error) {
         _status.text = @"Нет доступных страниц";
         return;
     }
+    BOOL enteringReader = _screen != 2;
     [self animateNavigationToScreen:2];
     _screen = 2;
+    [self setReaderFullscreen:enteringReader ? UI_USER_INTERFACE_IDIOM() == UIUserInterfaceIdiomPhone : _readerFullscreen];
     [self updateResumeButton];
     [self cancelCoverDownload];
     _infoView.hidden = YES;
     _table.hidden = YES;
     _pageView.hidden = NO;
-    _previous.hidden = NO;
-    _next.hidden = NO;
+    _previous.hidden = _readerFullscreen;
+    _next.hidden = _readerFullscreen;
     [self updatePageControls];
     NSString *pagePath = [[_pages objectAtIndex:_pageIndex] objectForKey:@"url"];
+    if (_offlineChapter) {
+        NSData *data = [_downloads page:_pageIndex entry:_offlineChapter];
+        UIImage *image = data ? [UIImage imageWithData:data] : nil;
+        [self transitionToPageImage:image];
+        [self saveReadingProgress];
+        _status.text = image ? [NSString stringWithFormat:@"Без интернета: страница %ld/%lu. Осталось: %ld",
+            (long)_pageIndex + 1, (unsigned long)[_pages count], (long)[_pages count] - _pageIndex - 1] :
+            @"Сохранённая страница повреждена. Удали загрузку и скачай главу заново.";
+        [self updateReaderInfo];
+        return;
+    }
     if (_live) {
         _lowMemory = NO;
         [self trimPageBuffer];
@@ -1369,6 +1684,7 @@ static id Fetch(NSString *path, NSError **error) {
         _status.text = _image.image ? [NSString stringWithFormat:@"Снимок: страница %ld/%lu (в главе %@)",
             (long)_pageIndex + 1, (unsigned long)[_pages count], [_snapshot objectForKey:@"total_pages"]] : @"Картинка не найдена";
         NSLog(@"MangaLib6 snapshot page %ld: %@ decoded=%@", (long)_pageIndex + 1, filename, _image.image ? @"YES" : @"NO");
+        [self updateReaderInfo];
     }
 }
 
@@ -1387,10 +1703,12 @@ static id Fetch(NSString *path, NSError **error) {
         forState:UIControlStateNormal];
     _previous.enabled = !_busy && _pageIndex > 0;
     _next.enabled = !_busy && (!lastPage || chapter != nil);
+    [self updateDownloadControls];
 }
 
 - (void)previousPage {
     if (!_busy && _pageIndex > 0) {
+        [self stopChapterDownload];
         _pageDirection = -1;
         _pageIndex--;
         [self showPage];
@@ -1447,6 +1765,7 @@ static id Fetch(NSString *path, NSError **error) {
             (long)_pageIndex + 1, (unsigned long)[_pages count], _image.image ? @"" : @" — загрузка",
             (long)forwardCount, (long)([self bufferEnd] - _pageIndex), (long)historyCount];
     }
+    [self updateReaderInfo];
 }
 
 - (void)displayPageImage:(UIImage *)image cacheHit:(BOOL)cacheHit {
@@ -1467,7 +1786,7 @@ static id Fetch(NSString *path, NSError **error) {
 
 - (void)prefetchPages {
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(prefetchPages) object:nil];
-    if (!_live || _screen != 2 || _busy || _imageTask) {
+    if (_offlineChapter || _downloading || !_live || _screen != 2 || _busy || _imageTask) {
         return;
     }
     if (![_imageServers count]) {
@@ -1544,6 +1863,7 @@ static id Fetch(NSString *path, NSError **error) {
         return;
     }
     if (_pageIndex + 1 < (NSInteger)[_pages count]) {
+        [self stopChapterDownload];
         _pageDirection = 1;
         _pageIndex++;
         [self showPage];
@@ -1617,6 +1937,22 @@ static id Fetch(NSString *path, NSError **error) {
 }
 
 - (void)completeImageDownload:(UIImage *)image error:(NSError *)error {
+    if ([[_imageTask objectForKey:@"kind"] isEqual:@"download-image"]) {
+        if (!_downloading || [[_imageTask objectForKey:@"download_generation"] unsignedIntegerValue] != _downloadGeneration) {
+            [self cancelImageDownload]; return;
+        }
+        NSInteger index = [[_imageTask objectForKey:@"page_index"] integerValue];
+        BOOL saved = image && _downloading && [_downloads savePage:_imageData index:index entry:_downloadEntry];
+        [self cancelImageDownload];
+        if (!saved) {
+            [self stopChapterDownload];
+            _status.text = error ? [error localizedDescription] : @"Не удалось сохранить страницу. Проверь свободное место.";
+        } else {
+            [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(chapterDownloadTimedOut) object:nil];
+            [self performSelector:@selector(downloadNextPage) withObject:nil afterDelay:0.05];
+        }
+        return;
+    }
     NSMutableDictionary *result = [NSMutableDictionary dictionaryWithDictionary:_imageTask];
     if (image) {
         [result setObject:image forKey:@"value"];
@@ -1779,7 +2115,7 @@ static id Fetch(NSString *path, NSError **error) {
         if (![value isKindOfClass:[NSDictionary class]]) {
             value = nil;
         }
-    } else if ([kind isEqual:@"chapter"]) {
+    } else if ([kind isEqual:@"chapter"] || [kind isEqual:@"download-chapter"]) {
         NSDictionary *chapter = [task objectForKey:@"chapter"];
         NSArray *branches = [chapter objectForKey:@"branches"];
         if (![branches count]) {
@@ -1823,6 +2159,18 @@ static id Fetch(NSString *path, NSError **error) {
 
 - (void)finish:(NSDictionary *)result {
     NSString *kind = [result objectForKey:@"kind"];
+    if ([kind isEqual:@"download-chapter"]) {
+        if (!_downloading || [[result objectForKey:@"download_generation"] unsignedIntegerValue] != _downloadGeneration) return;
+        _downloadPreparing = NO;
+        NSArray *pages = [result objectForKey:@"value"];
+        NSMutableDictionary *entry = pages ? [_downloads prepare:_downloadManga chapter:[result objectForKey:@"chapter"] pages:pages] : nil;
+        if (!entry) {
+            [self stopChapterDownload]; _status.text = [result objectForKey:@"error"] ?: @"Не удалось сохранить главу. Проверь свободное место.";
+            return;
+        }
+        [_downloadEntry release]; _downloadEntry = [entry retain];
+        [self downloadNextPage]; return;
+    }
     if ([kind isEqual:@"servers"]) {
         _serversLoading = NO;
         NSArray *servers = [result objectForKey:@"value"];
@@ -1830,6 +2178,11 @@ static id Fetch(NSString *path, NSError **error) {
             [_imageServers release];
             _imageServers = [servers copy];
             [[NSUserDefaults standardUserDefaults] setObject:servers forKey:@"MangaLib6ImageServers"];
+        }
+        if (_downloading) {
+            if ([_imageServers count]) [self downloadNextPage];
+            else { [self stopChapterDownload]; _status.text = @"Не удалось получить серверы. Нажми главу в «Загрузках», чтобы повторить."; }
+            return;
         }
         if (_live && _screen == 2) {
             if ([_imageServers count]) {
@@ -1959,6 +2312,10 @@ static id Fetch(NSString *path, NSError **error) {
 }
 
 - (void)dealloc {
+    [self stopChapterDownload];
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+    [_downloads release]; [_offlineChapter release]; [_downloadEntry release]; [_downloadManga release];
+    [_readerInfo release];
     [self cancelResumeCoverDownload];
     [_resumePanel release];
     [_resumeName release];

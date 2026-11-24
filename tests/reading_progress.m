@@ -5,6 +5,7 @@
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
+#import "chapter_downloads.h"
 
 @interface ProgressTestController : MangaLib6Controller {
     NSDictionary *_lastTask;
@@ -275,6 +276,13 @@ int main(int argc, char **argv) {
     } else {
         [controller runChecks];
     }
+    NSDictionary *original = [[[NSUserDefaults standardUserDefaults] dictionaryForKey:@"MangaLib6ReadingProgress"] copy];
+    DownloadTestController *downloads = [[DownloadTestController alloc] init];
+    [downloads runDownloadChecks:argc > 1 && strcmp(argv[1], "verify") == 0];
+    [downloads release];
+    [[NSUserDefaults standardUserDefaults] setObject:original forKey:@"MangaLib6ReadingProgress"];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+    [original release];
     [controller release];
     [pool drain];
     return 0;

@@ -7,4 +7,4 @@ info_plist = "Info.plist"
 resources = "../Resources"
 src = ["reading_progress.m"]
 frameworks = ["Foundation", "UIKit", "CoreGraphics", "QuartzCore"]
-cflags = ["-Wall", "-Wextra", "-Wno-unused-parameter"]
+cflags = ["-Wall", "-Wextra", "-Wno-unused-parameter", "-I../src", "-I."]

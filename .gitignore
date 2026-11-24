@@ -12,3 +12,8 @@ Resources/*
 .env
 .env.*
 !.env.example
+android/build/
+android/deps/
+android/.signing/
+*.apk
+*.apk.idsig
