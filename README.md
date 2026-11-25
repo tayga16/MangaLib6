@@ -113,7 +113,7 @@ meow build MangaLib6-ipa
 
 ```sh
 meow build MangaLib6-deb
-python tools/cydia_repo.py --deb build/ru.mangapad.apitest_0.5.1_iphoneos-arm.deb --ipa build/MangaLib6_0.5.1.ipa
+python packaging/cydia_repo.py --deb build/ru.mangapad.apitest_0.5.1_iphoneos-arm.deb --ipa build/MangaLib6_0.5.1.ipa
 ```
 
 Файлы появятся в `build/cydia/repo/`. Размещение на Linux-сервере описано

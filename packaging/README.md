@@ -11,8 +11,8 @@ IPA и DEB имеют один bundle ID; данные при переходе �
 ```sh
 meow build MangaLib6-ipa
 meow build MangaLib6-deb
-python tools/check_ipa.py build/MangaLib6_0.5.2.ipa
-python tools/cydia_repo.py --deb build/ru.mangapad.apitest_0.5.2_iphoneos-arm.deb --ipa build/MangaLib6_0.5.2.ipa
+python packaging/check_ipa.py build/MangaLib6_0.5.2.ipa
+python packaging/cydia_repo.py --deb build/ru.mangapad.apitest_0.5.2_iphoneos-arm.deb --ipa build/MangaLib6_0.5.2.ipa
 ```
 
 `build/cydia/repo/` содержит `Release`, `Packages`, `Packages.gz`, `Packages.bz2`,
