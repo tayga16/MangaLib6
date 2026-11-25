@@ -108,24 +108,14 @@ meow build MangaLib6-ipa
 
 ### Cydia-репозиторий
 
-Для устройств с jailbreak доступны DEB и архив статического репозитория в релизе 0.5.1.
-Сборка пакета и подготовка каталога для `http://tayga16.ru/repo/`:
-
-```sh
-meow build MangaLib6-deb
-python packaging/cydia_repo.py --deb build/ru.mangapad.apitest_0.5.1_iphoneos-arm.deb --ipa build/MangaLib6_0.5.1.ipa
-```
-
-Файлы появятся в `build/cydia/repo/`. Размещение на Linux-сервере описано
-в [packaging/README.md](packaging/README.md). Адрес источника станет доступен после размещения файлов на сервере.
+Для устройств с jailbreak добавь в Cydia источник `http://tayga16.ru:8088/repo/`
+и установи MangaLib6.
 
 ### GitHub Actions
 
 Workflow **Build IPA** собирает приложение при push в `main`, в pull request
-и вручную: **Actions → Build IPA → Run workflow**. Он также собирает DEB,
-проверяет пакеты и формирует архив Cydia-репозитория.
+и вручную: **Actions → Build IPA → Run workflow**.
 После успешной сборки скачай артефакт `MangaLib6-ipa` на странице запуска
 и распакуй ZIP, чтобы получить IPA.
-Артефакт `MangaLib6-cydia` содержит DEB и архив для размещения на сервере.
 
 Для установки на устройство потребуется подходящая подпись или среда установки.

@@ -17,5 +17,4 @@ maintainer = "tayga16"
 section = "Applications"
 depends = "firmware (>= 5.1), uikittools"
 packages_stanza = true
-scripts = { postinst = "packaging/postinst", postrm = "packaging/postrm" }
 fields = { Homepage = "https://github.com/tayga16/MangaLib6", Icon = "http://tayga16.ru:8088/repo/MangaLibIcon.png", Depiction = "http://tayga16.ru:8088/repo/depiction.html" }
