@@ -1,7 +1,7 @@
 # Cydia-репозиторий MangaLib6
 
 Репозиторий состоит из статических файлов. PHP, база данных и постоянно работающий
-Python не нужны. Веб-сервер раздаёт `repo/` по адресу `http://tayga16.ru/repo/`.
+Python не нужны. Рабочий источник: `http://tayga16.ru:8088/repo/`.
 Пакет рассчитан на jailbreak с обычной файловой системой iOS 5.1+ (ARMv7).
 IPA и DEB имеют один bundle ID; данные при переходе с установки IPA в `/Applications`
 могут оказаться в другом каталоге, поэтому заранее сохрани нужные скачанные главы.
@@ -11,13 +11,13 @@ IPA и DEB имеют один bundle ID; данные при переходе �
 ```sh
 meow build MangaLib6-ipa
 meow build MangaLib6-deb
-python tools/check_ipa.py build/MangaLib6_0.5.1.ipa
-python tools/cydia_repo.py --deb build/ru.mangapad.apitest_0.5.1_iphoneos-arm.deb --ipa build/MangaLib6_0.5.1.ipa
+python tools/check_ipa.py build/MangaLib6_0.5.2.ipa
+python tools/cydia_repo.py --deb build/ru.mangapad.apitest_0.5.2_iphoneos-arm.deb --ipa build/MangaLib6_0.5.2.ipa
 ```
 
 `build/cydia/repo/` содержит `Release`, `Packages`, `Packages.gz`, `Packages.bz2`,
-иконку, страницу с кнопкой добавления в Cydia и `debs/` с пакетом. Рядом появляется
-`MangaLib6_0.5.1_Cydia_repo.tar.gz`, готовый для переноса на сервер. Генератор проверяет
+иконку пакета, белую страницу сайта с баннером, описание `<3 from tayga` и `debs/` с пакетом. Рядом появляется
+`MangaLib6_0.5.2_Cydia_repo.tar.gz`, готовый для переноса на сервер. Генератор проверяет
 версию, ARM, права файлов, md5sums пакета, совпадение файлов IPA/DEB и хеши индексов.
 DEB использует gzip: старые версии dpkg в iOS не читают новые форматы сжатия.
 Скрипты установки обновляют список приложений через старую команду `uicache`.
@@ -81,18 +81,18 @@ SSH и панель Proxmox можно оставить доступными т�
 Если сайт уже работает, используй его существующий веб-сервер. Не заменяй
 конфигурацию сайта целиком. Пример ниже — для nginx и каталога `/var/www/tayga16`.
 
-1. Скачай архив репозитория из релиза `ios-v0.5.1` на GitHub или загрузи его через SFTP.
+1. Скачай архив репозитория из промежуточного релиза `ios-v0.5.2` на GitHub или загрузи его через SFTP.
    На сервере можно скачать командой:
 
    ```sh
-   curl -fL -o MangaLib6_0.5.1_Cydia_repo.tar.gz https://github.com/tayga16/MangaLib6/releases/download/ios-v0.5.1/MangaLib6_0.5.1_Cydia_repo.tar.gz
+   curl -fL -o MangaLib6_0.5.2_Cydia_repo.tar.gz https://github.com/tayga16/MangaLib6/releases/download/ios-v0.5.2/MangaLib6_0.5.2_Cydia_repo.tar.gz
    ```
 
 2. Создай каталог и распакуй архив:
 
    ```sh
    sudo mkdir -p /var/www/tayga16
-   sudo tar -xzf MangaLib6_0.5.1_Cydia_repo.tar.gz -C /var/www/tayga16
+   sudo tar -xzf MangaLib6_0.5.2_Cydia_repo.tar.gz -C /var/www/tayga16
    ```
 
 3. В HTTP-блок `server` для `tayga16.ru` добавь содержимое
@@ -117,14 +117,14 @@ DNS-запись A домена должна указывать на публи�
 ## Проверка с другого устройства
 
 ```sh
-curl -f http://tayga16.ru/repo/Release
-curl -f http://tayga16.ru/repo/Packages
-curl -f http://tayga16.ru/repo/Packages.gz | gzip -dc
-curl -f -o MangaLib6.deb http://tayga16.ru/repo/debs/ru.mangapad.apitest_0.5.1_iphoneos-arm.deb
+curl -f http://tayga16.ru:8088/repo/Release
+curl -f http://tayga16.ru:8088/repo/Packages
+curl -f http://tayga16.ru:8088/repo/Packages.gz | gzip -dc
+curl -f -o MangaLib6.deb http://tayga16.ru:8088/repo/debs/ru.mangapad.apitest_0.5.2_iphoneos-arm.deb
 ```
 
 Ответы должны содержать индексы и бинарный пакет, а не HTML с ошибкой.
-В Cydia добавь источник `http://tayga16.ru/repo/`, обнови источники и установи MangaLib6.
+В Cydia добавь источник `http://tayga16.ru:8088/repo/`, обнови источники и установи MangaLib6.
 Репозиторий пока без GPG-подписи; предупреждение Cydia о неизвестном источнике ожидаемо.
 Структура и целостность пакета проверяются при сборке; установка DEB на реальном
 jailbroken устройстве требует отдельной проверки.

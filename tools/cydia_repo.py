@@ -137,7 +137,10 @@ def verify_repo(output):
             assert filename in ('Packages', 'Packages.gz', 'Packages.bz2')
             data = (output / filename).read_bytes()
             assert int(size) == len(data) and checksum == digest(data, algorithm)
-    assert (output / 'CydiaIcon.png').read_bytes().startswith(b'\x89PNG\r\n\x1a\n')
+    for block in packages.decode('utf-8').strip().split('\n\n'):
+        icon_name = PurePosixPath(urlsplit(fields(block)['Icon']).path).name
+        assert icon_name in ('MangaLibIcon.png', 'CydiaIcon.png')
+        assert (output / icon_name).read_bytes().startswith(b'\x89PNG\r\n\x1a\n')
 
 
 def main():
@@ -145,7 +148,7 @@ def main():
     parser.add_argument('--deb', type=Path, required=True)
     parser.add_argument('--ipa', type=Path, help='Verify that IPA and DEB contain identical app files')
     parser.add_argument('--output', type=Path, default=ROOT / 'build/cydia/repo')
-    parser.add_argument('--url', default='http://tayga16.ru/repo/')
+    parser.add_argument('--url', default='http://tayga16.ru:8088/repo/')
     args = parser.parse_args()
     parsed = urlsplit(args.url)
     if parsed.scheme not in ('http', 'https') or not parsed.netloc or parsed.query or parsed.fragment:
@@ -158,7 +161,10 @@ def main():
     filename = args.deb.name
     body = args.deb.read_bytes()
     (output / 'debs' / filename).write_bytes(body)
-    package_text = control_text + f'Filename: debs/{filename}\nSize: {len(body)}\n'
+    package_text = ''.join(line + '\n' for line in control_text.splitlines()
+                           if not line.startswith(('Icon:', 'Depiction:')))
+    package_text += (f'Icon: {url}MangaLibIcon.png\nDepiction: {url}depiction.html\n'
+                     f'Filename: debs/{filename}\nSize: {len(body)}\n')
     for key, algorithm in [('MD5sum', 'md5'), ('SHA1', 'sha1'), ('SHA256', 'sha256')]:
         package_text += f'{key}: {digest(body, algorithm)}\n'
     packages = (package_text + '\n').encode('utf-8')
@@ -175,12 +181,15 @@ def main():
             data = (output / name).read_bytes()
             release += f' {digest(data, algorithm)} {len(data)} {name}\n'
     (output / 'Release').write_text(release, encoding='utf-8', newline='\n')
-    (output / 'CydiaIcon.png').write_bytes((ROOT / 'Resources/Icon.png').read_bytes())
+    (output / 'MangaLibIcon.png').write_bytes((ROOT / 'Resources/Icon.png').read_bytes())
+    (output / 'CydiaIcon.png').unlink(missing_ok=True)
     page = (ROOT / 'packaging/index.html').read_text(encoding='utf-8')
     for key, value in {'VERSION': control['Version'], 'URL': url,
                        'DEB': 'debs/' + filename}.items():
         page = page.replace('{{' + key + '}}', html.escape(value, quote=True))
     (output / 'index.html').write_text(page, encoding='utf-8', newline='\n')
+    for name in ('depiction.html', 'site tweaks.png'):
+        (output / name).write_bytes((ROOT / 'packaging' / name).read_bytes())
     verify_repo(output)
     archive_path = output.parent / f'MangaLib6_{control["Version"]}_Cydia_repo.tar.gz'
     with archive_path.open('wb') as target:

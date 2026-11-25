@@ -35,6 +35,7 @@
 Готовые IPA и APK: [Releases](https://github.com/tayga16/MangaLib6/releases).
 
 - iPhone/iPad: [MangaLib6 0.5.1](https://github.com/tayga16/MangaLib6/releases/tag/ios-v0.5.1).
+- Промежуточная версия iPhone/iPad: [MangaLib6 0.5.2 — иконка приложения](https://github.com/tayga16/MangaLib6/releases/tag/ios-v0.5.2).
 - Android 2.3+: [OldLib 0.1.0 — тестовый релиз](https://github.com/tayga16/MangaLib6/releases/tag/oldlib-v0.1.0).
 
 ## Управление
